@@ -1,0 +1,5 @@
+PySide6
+faster-whisper
+ffmpeg-python
+tqdm
+pydantic
