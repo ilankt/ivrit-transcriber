@@ -133,11 +133,12 @@ def transcribe_chunk_whispercpp(
         '--output-srt',
         '--output-txt',
         '--output-file', output_prefix,
+        '--print-progress',
         '--file', audio_path,
     ]
 
-    if use_gpu:
-        args.extend(['--gpu', '0'])
+    if not use_gpu:
+        args.append('--no-gpu')
 
     process = subprocess.Popen(
         args,
@@ -161,9 +162,14 @@ def transcribe_chunk_whispercpp(
 
     process.wait()
 
+    stderr_text = ''.join(stderr_lines)
+
     if process.returncode != 0:
-        stderr_text = ''.join(stderr_lines)
         raise RuntimeError(f"whisper-cli failed (exit code {process.returncode}):\n{stderr_text[:500]}")
+
+    # Check for errors in stderr even if exit code is 0
+    if 'error:' in stderr_text.lower() and 'unknown argument' in stderr_text.lower():
+        raise RuntimeError(f"whisper-cli argument error:\n{stderr_text[:500]}")
 
     # Parse output files
     srt_path = output_prefix + '.srt'
