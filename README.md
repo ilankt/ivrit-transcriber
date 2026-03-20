@@ -7,7 +7,7 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 - Transcribe Hebrew audio and video files (MP3, WAV, MP4, MKV, etc.)
 - Outputs **SRT subtitles**, **plain text**, or both
 - Two model options: **Fast** (turbo) and **Accurate** (full)
-- **GPU acceleration** with NVIDIA CUDA (auto-detected)
+- **GPU acceleration** — NVIDIA CUDA and AMD Vulkan (auto-detected)
 - Voice Activity Detection (VAD)
 - Progress tracking with ETA
 - Custom output filenames
@@ -16,8 +16,9 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 
 - Python 3.11+
 - [FFmpeg](https://ffmpeg.org/download.html) installed and available in PATH
-- CTranslate2 Hebrew Whisper models (see [Models](#models) below)
-- Optional: PyTorch with CUDA for GPU acceleration
+- Hebrew Whisper models (see [Models](#models) below)
+- Optional: PyTorch with CUDA for NVIDIA GPU acceleration
+- Optional: whisper.cpp with Vulkan for AMD GPU acceleration (see [AMD GPU Setup](#amd-gpu-setup))
 
 ## Installation
 
@@ -31,7 +32,11 @@ pip install -r requirements.txt
 
 ## Models
 
-Download the CTranslate2 Hebrew models and place them in a `Models/` directory at the project root:
+The app uses [ivrit.ai](https://www.ivrit.ai/) Hebrew Whisper models. Which format you need depends on your setup:
+
+### For CPU or NVIDIA GPU (CTranslate2 format)
+
+Download and place in `Models/`:
 
 ```
 Models/
@@ -39,9 +44,56 @@ Models/
   ivrit-large-v3-ct2/          # Accurate model
 ```
 
-Each model folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
+Each folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
 
-The models are based on [ivrit.ai](https://www.ivrit.ai/) Hebrew Whisper models converted to CTranslate2 format.
+### For AMD GPU (GGML format)
+
+Download and place in `Models/`:
+
+```bash
+# Fast model (1.5 GB)
+huggingface-cli download ivrit-ai/whisper-large-v3-turbo-ggml ggml-model.bin --local-dir Models/tmp-turbo
+mv Models/tmp-turbo/ggml-model.bin Models/ggml-ivrit-large-v3-turbo.bin
+
+# Accurate model (2.9 GB)
+huggingface-cli download ivrit-ai/whisper-large-v3-ggml ggml-model.bin --local-dir Models/tmp-full
+mv Models/tmp-full/ggml-model.bin Models/ggml-ivrit-large-v3.bin
+```
+
+## AMD GPU Setup
+
+AMD GPUs are supported via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) with Vulkan. The app auto-detects AMD GPUs and uses whisper.cpp when selected.
+
+### Prerequisites
+
+1. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) (select "Desktop development with C++")
+2. Install [CMake](https://cmake.org/download/)
+3. Install [Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows) (default options are fine)
+
+### Build whisper.cpp
+
+```bash
+git clone --depth 1 --branch v1.8.4 https://github.com/ggml-org/whisper.cpp.git
+cd whisper.cpp
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j
+```
+
+### Install
+
+Copy the built binaries into the project:
+
+```bash
+mkdir Binaries
+cp build/bin/Release/whisper-cli.exe Binaries/
+cp build/bin/Release/whisper.dll Binaries/
+cp build/bin/Release/ggml.dll Binaries/
+cp build/bin/Release/ggml-base.dll Binaries/
+cp build/bin/Release/ggml-cpu.dll Binaries/
+cp build/bin/Release/ggml-vulkan.dll Binaries/
+```
+
+Then download the GGML models (see [Models](#for-amd-gpu-ggml-format) above).
 
 ## Usage
 
@@ -52,6 +104,8 @@ python app.py
 1. Click **Select File** and choose an audio or video file
 2. Set the output folder and options (model, format, device)
 3. Click **Start Transcription**
+
+The device dropdown auto-detects available GPUs. Select **Auto** to let the app choose the best option.
 
 ## Building an Executable
 
@@ -65,18 +119,19 @@ The executable will be in `dist/IvritTranscriber/`.
 ## Project Structure
 
 ```
-app.py                  # Main application and GUI
+app.py                      # Main application and GUI
 core/
-  settings.py           # Settings persistence (Pydantic)
-  jobs.py               # Job/Task state management
-  worker.py             # Transcription worker (QRunnable)
+  settings.py               # Settings persistence (Pydantic)
+  jobs.py                   # Job/Task state management
+  worker.py                 # Transcription worker (QRunnable)
 engine/
-  ffmpeg_helper.py      # FFmpeg wrapper (probe, extract, split)
-  model_loader.py       # CTranslate2 model validation and loading
-  gpu_detector.py       # NVIDIA CUDA detection
-  transcriber.py        # Chunk transcription logic
-  merger.py             # Merge chunks into final SRT/TXT
-  checkpoint.py         # Checkpoint support
+  ffmpeg_helper.py           # FFmpeg wrapper (probe, extract, split)
+  model_loader.py            # CTranslate2 model validation and loading
+  gpu_detector.py            # NVIDIA CUDA and AMD Vulkan detection
+  transcriber.py             # Chunk transcription (faster-whisper)
+  whisper_cpp_runner.py      # Chunk transcription (whisper.cpp subprocess)
+  merger.py                  # Merge chunks into final SRT/TXT
+  checkpoint.py              # Checkpoint support
 ```
 
 ## License
