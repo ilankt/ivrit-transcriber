@@ -22,7 +22,7 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ivrit-transcriber.git
+git clone https://github.com/ilankt/ivrit-transcriber.git
 cd ivrit-transcriber
 python -m venv .venv
 .venv\Scripts\activate     # Windows
