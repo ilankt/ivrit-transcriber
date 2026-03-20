@@ -244,7 +244,10 @@ class MainWindow(QMainWindow):
         save_settings(self.settings)
 
     def _select_file(self):
-        file, _ = QFileDialog.getOpenFileName(self, "Select File")
+        file, _ = QFileDialog.getOpenFileName(
+            self, "Select File", "",
+            "Media Files (*.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a *.mp4 *.mkv *.avi *.mov *.webm *.wmv *.flv *.ts);;Audio Files (*.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a);;Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.wmv *.flv *.ts);;All Files (*)"
+        )
         if not file:
             return
 
@@ -358,6 +361,18 @@ class MainWindow(QMainWindow):
         if self.current_job.status == JobStatus.RUNNING:
             QMessageBox.information(self, "Already Running", "Transcription is already in progress.")
             return
+
+        # Verify chunk files still exist (they may be gone if a previous run failed and cleaned up)
+        for task in self.current_job.tasks:
+            if not os.path.exists(task.chunk_path):
+                QMessageBox.warning(
+                    self, "Start Transcription",
+                    "Temporary audio files no longer exist.\nPlease re-select the input file."
+                )
+                self.current_job = None
+                self.status_label.setText("Ready")
+                self.progress_bar.setValue(0)
+                return
 
         output_dir = self.output_folder_edit.text()
         if not output_dir:

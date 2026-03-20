@@ -2,7 +2,7 @@ from faster_whisper import WhisperModel
 import os
 import json
 
-def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_size: int, vad_filter: bool):
+def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_size: int, vad_filter: bool, cancel_event=None):
     segments, info = model.transcribe(
         audio_path,
         language=language,
@@ -13,6 +13,8 @@ def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_s
     all_text = []
     srt_segments = []
     for segment in segments:
+        if cancel_event and cancel_event.is_set():
+            break
         all_text.append(segment.text)
         # Use JSON format to avoid issues with commas in transcribed text
         srt_segments.append(json.dumps({

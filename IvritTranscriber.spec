@@ -23,6 +23,10 @@ a = Analysis(
         'PyQt5', 'PyQt6', 'tkinter', '_tkinter',
         'matplotlib', 'pygame', 'notebook', 'nbformat',
         'IPython', 'jupyter', 'black', 'yapf',
+        # Large packages not used by the app
+        'pyarrow', 'av', 'scipy', 'onnxruntime',
+        'babel', 'pandas', 'sphinx', 'lxml',
+        'cryptography', 'rapidfuzz',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

@@ -104,7 +104,8 @@ def transcribe_chunk_whispercpp(
     vad_filter: bool = True,
     use_gpu: bool = True,
     progress_callback=None,
-) -> tuple[str, list[str], subprocess.Popen | None]:
+    cancel_event=None,
+) -> tuple[str, list[str]]:
     """
     Transcribe an audio chunk using whisper.cpp.
 
@@ -116,9 +117,10 @@ def transcribe_chunk_whispercpp(
         vad_filter: Whether to use VAD (not directly supported, ignored)
         use_gpu: Whether to use GPU (Vulkan)
         progress_callback: Optional callable(int) for progress percentage
+        cancel_event: Optional threading.Event checked for cancellation
 
     Returns:
-        (full_text, srt_segments_json_list, process_handle)
+        (full_text, srt_segments_json_list)
         srt_segments_json_list matches the format used by transcribe_chunk()
     """
     # Create a temp dir for output files
@@ -159,6 +161,10 @@ def transcribe_chunk_whispercpp(
                 match = progress_pattern.search(line)
                 if match:
                     progress_callback(int(match.group(1)))
+            if cancel_event and cancel_event.is_set():
+                process.terminate()
+                process.wait()
+                raise InterruptedError("Transcription canceled")
 
     process.wait()
 

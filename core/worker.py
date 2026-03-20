@@ -4,6 +4,7 @@ import tempfile
 import shutil
 import time
 import logging
+import threading
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 from core.jobs import Job, Task, JobStatus, TaskStatus
@@ -84,21 +85,45 @@ class TranscriptionWorker(QRunnable):
         self.signals = WorkerSignals()
         self.is_paused = False
         self.is_canceled = False
+        self._cancel_event = threading.Event()
         self.start_time = 0
         self.processed_audio_duration = 0.0
         self.total_audio_duration = 0.0
-        self._current_process = None  # For whisper.cpp subprocess cancellation
 
     def _get_base_name(self):
         if hasattr(self.job, 'custom_output_filename') and self.job.custom_output_filename:
             return self.job.custom_output_filename
         return os.path.splitext(os.path.basename(self.job.original_file_path))[0]
 
+    def _run_cancellable(self, fn, *args, **kwargs):
+        """Run a function in a daemon thread, allowing immediate cancellation."""
+        result = [None]
+        error = [None]
+
+        def target():
+            try:
+                result[0] = fn(*args, **kwargs)
+            except Exception as e:
+                error[0] = e
+
+        t = threading.Thread(target=target, daemon=True)
+        t.start()
+
+        while t.is_alive():
+            if self._cancel_event.is_set():
+                raise InterruptedError("Transcription canceled")
+            t.join(timeout=0.2)
+
+        if error[0]:
+            raise error[0]
+        return result[0]
+
     @Slot()
     def run(self):
         self.signals.job_status_updated.emit(JobStatus.RUNNING, "Starting job")
         model = None
         self.start_time = time.time()
+        cleanup_temp = False
 
         engine = determine_engine(self.settings.device)
 
@@ -174,23 +199,30 @@ class TranscriptionWorker(QRunnable):
                 )
 
                 # Transcribe chunk using the selected engine
-                if engine == "whisper-cpp":
-                    def progress_cb(pct):
-                        self.signals.progress_updated.emit(i, pct / 100.0)
+                try:
+                    if engine == "whisper-cpp":
+                        def progress_cb(pct):
+                            self.signals.progress_updated.emit(i, pct / 100.0)
 
-                    text, srt_segments = transcribe_chunk_whispercpp(
-                        audio_path=task.chunk_path,
-                        model_path=ggml_path,
-                        binary_path=binary_path,
-                        beam_size=beam_size,
-                        vad_filter=self.settings.vad_enabled,
-                        use_gpu=True,
-                        progress_callback=progress_cb,
-                    )
-                else:
-                    text, srt_segments = transcribe_chunk(
-                        task.chunk_path, model, "he", beam_size, self.settings.vad_enabled
-                    )
+                        text, srt_segments = transcribe_chunk_whispercpp(
+                            audio_path=task.chunk_path,
+                            model_path=ggml_path,
+                            binary_path=binary_path,
+                            beam_size=beam_size,
+                            vad_filter=self.settings.vad_enabled,
+                            use_gpu=True,
+                            progress_callback=progress_cb,
+                            cancel_event=self._cancel_event,
+                        )
+                    else:
+                        text, srt_segments = self._run_cancellable(
+                            transcribe_chunk,
+                            task.chunk_path, model, "he", beam_size, self.settings.vad_enabled,
+                            cancel_event=self._cancel_event,
+                        )
+                except InterruptedError:
+                    self._save_and_report_cancel()
+                    return
 
                 if self.is_canceled:
                     task.text = text
@@ -228,6 +260,7 @@ class TranscriptionWorker(QRunnable):
                 self._emit_eta()
 
             # All chunks completed
+            cleanup_temp = True
             base_name = self._get_base_name()
             self.signals.job_status_updated.emit(JobStatus.DONE, "Job completed")
             total_time = time.time() - self.start_time
@@ -252,7 +285,8 @@ class TranscriptionWorker(QRunnable):
 
             logging.error(f"Error during transcription for {self.job.original_file_path}: {e}")
         finally:
-            if hasattr(self.job, 'temp_dir') and os.path.exists(self.job.temp_dir):
+            # Only clean up temp files on success — keep them on error so user can retry
+            if cleanup_temp and hasattr(self.job, 'temp_dir') and os.path.exists(self.job.temp_dir):
                 shutil.rmtree(self.job.temp_dir)
             self.signals.finished.emit()
 
@@ -293,9 +327,4 @@ class TranscriptionWorker(QRunnable):
 
     def cancel(self):
         self.is_canceled = True
-        # Kill whisper.cpp subprocess immediately if running
-        if self._current_process:
-            try:
-                self._current_process.terminate()
-            except Exception:
-                pass
+        self._cancel_event.set()
