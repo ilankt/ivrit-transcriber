@@ -9,6 +9,9 @@ __pycache__/
 # ML Models (too large for git)
 Models/
 
+# whisper.cpp binaries (built locally)
+Binaries/
+
 # PyInstaller
 build/
 dist/
