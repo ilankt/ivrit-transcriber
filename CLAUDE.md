@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ivrit Transcriber is a desktop application for transcribing Hebrew audio and video files using the Faster-Whisper transcription engine. The application is built with Python 3.11+ and PySide6 (Qt), providing an offline transcription solution with a GUI.
+Ivrit Transcriber is a desktop application for transcribing Hebrew audio and video files. It supports two transcription backends: Faster-Whisper (CTranslate2, for NVIDIA/CPU) and whisper.cpp (Vulkan, for AMD GPUs). Built with Python 3.11+ and PySide6 (Qt), providing an offline transcription solution with a GUI.
 
 ## Architecture
 
@@ -17,17 +17,18 @@ Ivrit Transcriber is a desktop application for transcribing Hebrew audio and vid
 1. File input → Media probing (FFmpeg)
 2. Video files → Audio extraction (FFmpeg)
 3. Audio splitting into 1-minute chunks (FFmpeg)
-4. Chunk-by-chunk transcription (Faster-Whisper)
+4. Chunk-by-chunk transcription (Faster-Whisper or whisper.cpp depending on device)
 5. Merging outputs to `.txt` and `.srt` files
 
 **Module Structure:**
 - `core/settings.py` - Settings persistence using Pydantic models (saved to `%APPDATA%/IvritTranscriber/settings.json` on Windows, `~/.ivrit_transcriber/settings.json` on Linux)
 - `core/jobs.py` - Job and Task state management with enums for status tracking
-- `core/worker.py` - `TranscriptionWorker` QRunnable that processes jobs asynchronously using Qt's thread pool
+- `core/worker.py` - `TranscriptionWorker` QRunnable that processes jobs asynchronously using Qt's thread pool; routes to the correct engine based on device setting
 - `engine/ffmpeg_helper.py` - FFmpeg wrapper functions for probing, audio extraction, and splitting
 - `engine/model_loader.py` - CTranslate2 model validation and Faster-Whisper initialization with GPU support
-- `engine/gpu_detector.py` - NVIDIA CUDA GPU detection utility (checks for compatible hardware)
-- `engine/transcriber.py` - Chunk transcription logic using Faster-Whisper
+- `engine/gpu_detector.py` - GPU detection for both NVIDIA CUDA and AMD Vulkan
+- `engine/transcriber.py` - Chunk transcription logic using Faster-Whisper (NVIDIA/CPU path)
+- `engine/whisper_cpp_runner.py` - Chunk transcription via whisper.cpp subprocess (AMD GPU path)
 - `engine/merger.py` - Merges transcribed chunks into final `.txt` and `.srt` files with proper time offsets (uses JSON format for robustness)
 
 ### Key Design Decisions
@@ -37,7 +38,9 @@ Ivrit Transcriber is a desktop application for transcribing Hebrew audio and vid
 - **Chunk Duration**: Audio is split into 1-minute chunks (hardcoded in `app.py`)
 - **Model Selection**: "Fast" uses `ivrit-large-v3-turbo-ct2` with beam_size=1, "Accurate" uses `ivrit-large-v3-ct2` with beam_size=3
 - **Model Location**: Models are expected in `Models/` subdirectory relative to the application (supports PyInstaller packaging via `get_base_path()` in `worker.py`)
-- **Device Selection**: User can choose Auto/CPU/GPU via UI. GPU option only shown if NVIDIA CUDA is detected. Device setting saved in settings.json.
+- **Device Selection**: User can choose Auto/CPU/NVIDIA GPU/AMD GPU via UI. GPU options only shown if compatible hardware is detected. Device setting saved in settings.json.
+- **Dual Engine**: NVIDIA/CPU uses faster-whisper (CTranslate2 models). AMD uses whisper.cpp with Vulkan (GGML models). Engine is auto-selected based on device setting.
+- **whisper.cpp Integration**: Called as subprocess (like FFmpeg). Binary expected in `Binaries/` or system PATH. GGML models expected in `Models/`.
 
 ## Development Commands
 

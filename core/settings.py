@@ -9,7 +9,7 @@ class Settings(BaseModel):
     threads: int = 0
     compute_type: str = "auto"
     output_folder: Optional[str] = None
-    device: str = "auto"  # "auto", "cpu", or "gpu" (NVIDIA CUDA only)
+    device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
     output_format: str = "srt"  # "srt", "txt", or "both"
     default_output_filename: Optional[str] = None  # Not persisted per user preference
 
@@ -24,7 +24,11 @@ def load_settings() -> Settings:
     if os.path.exists(path):
         with open(path, 'r') as f:
             try:
-                return Settings.parse_obj(json.load(f))
+                data = json.load(f)
+                # Migrate old "gpu" device value to "nvidia"
+                if data.get('device') == 'gpu':
+                    data['device'] = 'nvidia'
+                return Settings.parse_obj(data)
             except (json.JSONDecodeError, TypeError):
                 return Settings()
     return Settings()

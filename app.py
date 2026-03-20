@@ -15,7 +15,7 @@ from core.settings import load_settings, save_settings, Settings
 from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
 from core.worker import TranscriptionWorker
-from engine.gpu_detector import detect_cuda_gpu
+from engine.gpu_detector import detect_all_gpus
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -29,8 +29,10 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(1)  # Process jobs sequentially
 
-        # Detect NVIDIA CUDA GPU availability
-        self.cuda_available, self.gpu_info = detect_cuda_gpu()
+        # Detect GPU availability
+        self.gpu_info = detect_all_gpus()
+        self.nvidia_available = self.gpu_info["nvidia_cuda"]["available"]
+        self.amd_available = self.gpu_info["amd_vulkan"]["available"]
 
         # Menu bar
         self._create_menu_bar()
@@ -137,12 +139,19 @@ class MainWindow(QMainWindow):
         self.device_combo.addItem("Auto (Try GPU, fallback to CPU)", "auto")
         self.device_combo.addItem("CPU Only", "cpu")
 
-        # Only add GPU option if NVIDIA CUDA is available
-        if self.cuda_available:
-            self.device_combo.addItem(f"GPU Only ({self.gpu_info})", "gpu")
+        if self.nvidia_available:
+            self.device_combo.addItem(
+                f"NVIDIA GPU ({self.gpu_info['nvidia_cuda']['info']})", "nvidia"
+            )
+        if self.amd_available:
+            self.device_combo.addItem(
+                f"AMD GPU ({self.gpu_info['amd_vulkan']['info']})", "amd"
+            )
 
         # If GPU was previously selected but is no longer available, reset to auto
-        if self.settings.device == "gpu" and not self.cuda_available:
+        if self.settings.device == "nvidia" and not self.nvidia_available:
+            self.settings.device = "auto"
+        if self.settings.device == "amd" and not self.amd_available:
             self.settings.device = "auto"
 
         options_layout.addRow("Device:", self.device_combo)

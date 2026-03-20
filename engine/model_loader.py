@@ -11,28 +11,25 @@ def validate_model_path(path: str) -> bool:
     return True
 
 def load_whisper_model(model_path: str, device: str, compute_type: str, threads: int):
-    actual_device = device.lower() # Convert to lowercase for consistency
+    actual_device = device.lower()
 
     if actual_device == "auto":
         try:
-            # Try CUDA first
             model = WhisperModel(model_path, device="cuda", compute_type=compute_type, cpu_threads=threads)
             return model, None
         except Exception as e_cuda:
-            # If CUDA fails, fall back to CPU
             try:
                 model = WhisperModel(model_path, device="cpu", compute_type=compute_type, cpu_threads=threads)
                 return model, None
             except Exception as e_cpu:
                 return None, f"Failed to load model on both CUDA and CPU: CUDA error: {e_cuda}, CPU error: {e_cpu}"
-    elif actual_device == "gpu":
-        # Map "GPU" to "cuda"
+    elif actual_device in ("gpu", "nvidia"):
         try:
             model = WhisperModel(model_path, device="cuda", compute_type=compute_type, cpu_threads=threads)
             return model, None
         except Exception as e:
             return None, f"Failed to load model on GPU (cuda): {e}"
-    else: # "cpu" or any other explicit device
+    else:  # "cpu" or any other explicit device
         try:
             model = WhisperModel(model_path, device=actual_device, compute_type=compute_type, cpu_threads=threads)
             return model, None
