@@ -24,7 +24,7 @@ a = Analysis(
         'matplotlib', 'pygame', 'notebook', 'nbformat',
         'IPython', 'jupyter', 'black', 'yapf',
         # Large packages not used by the app
-        'pyarrow', 'av', 'scipy', 'onnxruntime',
+        'pyarrow', 'scipy', 'onnxruntime',
         'babel', 'pandas', 'sphinx', 'lxml',
         'cryptography', 'rapidfuzz',
     ],
