@@ -2,7 +2,7 @@
 Live Transcription Panel UI.
 
 Provides the UI for real-time audio capture and transcription from
-system audio (WASAPI loopback), typically used for Zoom meetings.
+system audio (WASAPI loopback), with word-by-word streaming display.
 """
 import os
 from datetime import datetime
@@ -12,9 +12,10 @@ from PySide6.QtWidgets import (
     QLineEdit, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QTextCursor
 
 from engine.audio_capture import list_loopback_devices
-from core.live_worker import LiveTranscriptionWorker, save_live_session
+from core.live_worker import LiveTranscriptionWorker, save_live_session, BUFFER_DURATION_SEC
 
 
 class LiveTranscriptionPanel(QWidget):
@@ -29,6 +30,11 @@ class LiveTranscriptionPanel(QWidget):
         self._session_timer.timeout.connect(self._update_elapsed_time)
         self._session_start_time = None
         self._devices: list[dict] = []
+
+        # Word-by-word streaming state
+        self._word_queue: list[tuple[str | None, str]] = []  # (timestamp_or_None, word)
+        self._word_timer = QTimer(self)
+        self._word_timer.timeout.connect(self._display_next_word)
 
         self._build_ui()
         self._refresh_devices()
@@ -132,7 +138,7 @@ class LiveTranscriptionPanel(QWidget):
         self._devices = list_loopback_devices()
 
         if not self._devices:
-            self.device_combo.addItem("No loopback devices found", None)
+            self.device_combo.addItem("No loopback devices found — install pyaudiowpatch", None)
             self.start_button.setEnabled(False)
         else:
             for dev in self._devices:
@@ -188,8 +194,9 @@ class LiveTranscriptionPanel(QWidget):
             device_sample_rate=dev['sample_rate'],
             device_channels=dev['channels'],
             settings=self.settings,
+            backend=dev.get('backend', 'sounddevice'),
         )
-        self._worker.segment_ready.connect(self._on_segment_ready)
+        self._worker.words_ready.connect(self._on_words_ready)
         self._worker.audio_level.connect(self._on_audio_level)
         self._worker.status_updated.connect(self._on_status)
         self._worker.error_occurred.connect(self._on_error)
@@ -214,20 +221,66 @@ class LiveTranscriptionPanel(QWidget):
         if self._worker is None:
             return
 
+        self._session_timer.stop()
+        self._word_timer.stop()
+        # Flush remaining words immediately
+        self._flush_word_queue()
         self.stop_button.setEnabled(False)
         self.status_label.setText("Stopping...")
         self._worker.stop()
 
-    def _on_segment_ready(self, start: float, end: float, text: str):
-        """Append a transcribed segment to the transcript view."""
-        h = int(start // 3600)
-        m = int((start % 3600) // 60)
-        s = int(start % 60)
-        timestamp = f"[{h:02d}:{m:02d}:{s:02d}]"
-        self.transcript_edit.append(f"{timestamp} {text}")
+    def _on_words_ready(self, wall_time: str, words: list):
+        """Queue words for gradual display, simulating live captions."""
+        # Flush any remaining words from previous batch immediately
+        self._flush_word_queue()
+
+        if not words:
+            return
+
+        # First word gets the timestamp (starts a new line)
+        self._word_queue.append((wall_time, words[0]))
+        # Remaining words continue on the same line
+        for word in words[1:]:
+            self._word_queue.append((None, word))
+
+        # Spread words over the buffer duration for a live feel
+        interval_ms = max(50, int(BUFFER_DURATION_SEC * 1000 / len(words)))
+        self._word_timer.start(interval_ms)
+
+    def _display_next_word(self):
+        """Display the next word from the queue."""
+        if not self._word_queue:
+            self._word_timer.stop()
+            return
+
+        timestamp, word = self._word_queue.pop(0)
+
+        cursor = self.transcript_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        if timestamp is not None:
+            # New line with timestamp
+            if not self.transcript_edit.toPlainText():
+                cursor.insertText(f"[{timestamp}] {word}")
+            else:
+                cursor.insertText(f"\n[{timestamp}] {word}")
+        else:
+            # Continue on current line
+            cursor.insertText(f" {word}")
+
+        self.transcript_edit.setTextCursor(cursor)
+
         # Auto-scroll to bottom
         scrollbar = self.transcript_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+        if not self._word_queue:
+            self._word_timer.stop()
+
+    def _flush_word_queue(self):
+        """Display all remaining queued words immediately."""
+        while self._word_queue:
+            self._display_next_word()
 
     def _on_audio_level(self, level: float):
         """Update VU meter."""
@@ -244,6 +297,12 @@ class LiveTranscriptionPanel(QWidget):
     def _on_session_finished(self):
         """Save output and reset UI after session ends."""
         self._session_timer.stop()
+        self._word_timer.stop()
+        self._flush_word_queue()
+
+        # Wait for the worker thread to actually finish before cleanup
+        if self._worker is not None:
+            self._worker.wait(5000)
 
         # Save output files
         if self._worker and self._worker.session_segments:
@@ -266,6 +325,7 @@ class LiveTranscriptionPanel(QWidget):
             self.status_label.setText("Session ended (no segments)")
 
         self._worker = None
+        self._word_queue.clear()
 
         # Reset UI state
         self.start_button.setEnabled(True)

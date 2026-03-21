@@ -11,13 +11,30 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
                                QTabWidget)
 from PySide6.QtGui import QAction
-from PySide6.QtCore import QThreadPool, QTimer
+from PySide6.QtCore import QThreadPool, QTimer, Qt
 from core.settings import load_settings, save_settings, Settings
 from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
 from core.worker import TranscriptionWorker
 from engine.gpu_detector import detect_all_gpus
 from ui.live_panel import LiveTranscriptionPanel
+from ui.settings_panel import SettingsPanel
+
+
+def apply_theme(theme: str):
+    """Apply the specified theme to the application."""
+    app = QApplication.instance()
+    if app is None:
+        return
+
+    hints = app.styleHints()
+    if theme == "dark":
+        hints.setColorScheme(Qt.ColorScheme.Dark)
+    elif theme == "light":
+        hints.setColorScheme(Qt.ColorScheme.Light)
+    else:  # system
+        hints.setColorScheme(Qt.ColorScheme.Unknown)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -33,8 +50,9 @@ class MainWindow(QMainWindow):
 
         # Detect GPU availability
         self.gpu_info = detect_all_gpus()
-        self.nvidia_available = self.gpu_info["nvidia_cuda"]["available"]
-        self.amd_available = self.gpu_info["amd_vulkan"]["available"]
+
+        # Apply saved theme
+        apply_theme(self.settings.theme)
 
         # Menu bar
         self._create_menu_bar()
@@ -53,13 +71,9 @@ class MainWindow(QMainWindow):
         file_tab_layout = QVBoxLayout()
         file_tab.setLayout(file_tab_layout)
 
-        # Input Pane
         self._create_input_pane(file_tab_layout)
-
-        # Status Pane
+        self._create_output_pane(file_tab_layout)
         self._create_status_pane(file_tab_layout)
-
-        # Run Pane
         self._create_run_pane(file_tab_layout)
 
         self.tab_widget.addTab(file_tab, "File Transcription")
@@ -68,8 +82,10 @@ class MainWindow(QMainWindow):
         self.live_panel = LiveTranscriptionPanel(self.settings)
         self.tab_widget.addTab(self.live_panel, "Live Transcription")
 
-        # Options Pane (shared, below tabs)
-        self._create_options_pane(main_layout)
+        # --- Tab 3: Settings ---
+        self.settings_panel = SettingsPanel(self.settings, self.gpu_info)
+        self.settings_panel.theme_changed.connect(self._on_theme_changed)
+        self.tab_widget.addTab(self.settings_panel, "Settings")
 
         self.setCentralWidget(main_widget)
 
@@ -115,6 +131,32 @@ class MainWindow(QMainWindow):
         input_group_box.setLayout(input_layout)
         layout.addWidget(input_group_box)
 
+    def _create_output_pane(self, layout):
+        output_group_box = QGroupBox("Output")
+        output_layout = QFormLayout()
+
+        # Output folder
+        output_folder_layout = QHBoxLayout()
+        self.output_folder_edit = QLineEdit()
+        self.output_folder_button = QPushButton("Browse...")
+        self.output_folder_button.clicked.connect(self._browse_output_folder)
+        output_folder_layout.addWidget(self.output_folder_edit)
+        output_folder_layout.addWidget(self.output_folder_button)
+        output_layout.addRow("Output Folder:", output_folder_layout)
+
+        # Output filename (custom)
+        self.output_filename_edit = QLineEdit()
+        self.output_filename_edit.setPlaceholderText("Leave empty to use input filename")
+        output_layout.addRow("Output Filename:", self.output_filename_edit)
+
+        # Help text
+        help_label = QLabel("Filename without extension (e.g., 'my_transcription')")
+        help_label.setStyleSheet("color: gray; font-size: 10pt;")
+        output_layout.addRow("", help_label)
+
+        output_group_box.setLayout(output_layout)
+        layout.addWidget(output_group_box)
+
     def _create_status_pane(self, layout):
         status_group_box = QGroupBox("Transcription Status")
         status_layout = QVBoxLayout()
@@ -135,71 +177,6 @@ class MainWindow(QMainWindow):
 
         status_group_box.setLayout(status_layout)
         layout.addWidget(status_group_box)
-
-    def _create_options_pane(self, layout):
-        options_group_box = QGroupBox("Options")
-        options_layout = QFormLayout()
-        options_group_box.setLayout(options_layout)
-
-        # Model Type
-        self.model_type_combo = QComboBox()
-        self.model_type_combo.addItems(["Fast", "Accurate"])
-        options_layout.addRow("Model:", self.model_type_combo)
-
-        # VAD
-        self.vad_checkbox = QCheckBox("Enable VAD (Voice Activity Detection)")
-        self.vad_checkbox.setChecked(True)
-        options_layout.addRow(self.vad_checkbox)
-
-        # Device selection (CPU/GPU)
-        self.device_combo = QComboBox()
-        self.device_combo.addItem("Auto (Try GPU, fallback to CPU)", "auto")
-        self.device_combo.addItem("CPU Only", "cpu")
-
-        if self.nvidia_available:
-            self.device_combo.addItem(
-                f"NVIDIA GPU ({self.gpu_info['nvidia_cuda']['info']})", "nvidia"
-            )
-        if self.amd_available:
-            self.device_combo.addItem(
-                f"AMD GPU ({self.gpu_info['amd_vulkan']['info']})", "amd"
-            )
-
-        # If GPU was previously selected but is no longer available, reset to auto
-        if self.settings.device == "nvidia" and not self.nvidia_available:
-            self.settings.device = "auto"
-        if self.settings.device == "amd" and not self.amd_available:
-            self.settings.device = "auto"
-
-        options_layout.addRow("Device:", self.device_combo)
-
-        # Output format
-        self.output_format_combo = QComboBox()
-        self.output_format_combo.addItem("SRT (Subtitles)", "srt")
-        self.output_format_combo.addItem("TXT (Plain Text)", "txt")
-        self.output_format_combo.addItem("Both (SRT + TXT)", "both")
-        options_layout.addRow("Output Format:", self.output_format_combo)
-
-        # Output folder
-        output_folder_layout = QHBoxLayout()
-        self.output_folder_edit = QLineEdit()
-        self.output_folder_button = QPushButton("Browse...")
-        self.output_folder_button.clicked.connect(self._browse_output_folder)
-        output_folder_layout.addWidget(self.output_folder_edit)
-        output_folder_layout.addWidget(self.output_folder_button)
-        options_layout.addRow("Output Folder:", output_folder_layout)
-
-        # Output filename (custom)
-        self.output_filename_edit = QLineEdit()
-        self.output_filename_edit.setPlaceholderText("Leave empty to use input filename")
-        options_layout.addRow("Output Filename:", self.output_filename_edit)
-
-        # Help text
-        help_label = QLabel("Filename without extension (e.g., 'my_transcription')")
-        help_label.setStyleSheet("color: gray; font-size: 10pt;")
-        options_layout.addRow("", help_label)
-
-        layout.addWidget(options_group_box)
 
     def _create_run_pane(self, layout):
         run_group_box = QGroupBox("Run")
@@ -233,33 +210,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(run_group_box)
 
     def _load_settings_to_ui(self):
-        self.model_type_combo.setCurrentText(self.settings.model_type)
-        self.vad_checkbox.setChecked(self.settings.vad_enabled)
         self.output_folder_edit.setText(self.settings.output_folder or "")
-
         # Do NOT load default_output_filename - always start empty per user preference
         self.output_filename_edit.setText("")
 
-        # Load device setting
-        for i in range(self.device_combo.count()):
-            if self.device_combo.itemData(i) == self.settings.device:
-                self.device_combo.setCurrentIndex(i)
-                break
-
-        # Load output format setting
-        for i in range(self.output_format_combo.count()):
-            if self.output_format_combo.itemData(i) == self.settings.output_format:
-                self.output_format_combo.setCurrentIndex(i)
-                break
-
     def _save_settings_from_ui(self):
-        self.settings.model_type = self.model_type_combo.currentText()
-        self.settings.vad_enabled = self.vad_checkbox.isChecked()
         self.settings.output_folder = self.output_folder_edit.text()
-        self.settings.device = self.device_combo.currentData()
-        self.settings.output_format = self.output_format_combo.currentData()
+        self.settings_panel.save_settings()
         self.live_panel.save_settings()
         save_settings(self.settings)
+
+    def _on_theme_changed(self, theme):
+        apply_theme(theme)
+        self.settings.theme = theme
 
     def _select_file(self):
         file, _ = QFileDialog.getOpenFileName(

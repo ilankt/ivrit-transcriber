@@ -3,23 +3,78 @@ Audio capture infrastructure for live transcription.
 
 Provides WASAPI loopback device enumeration, thread-safe audio buffering,
 and resampling to 16kHz mono float32 for whisper model input.
+
+Prefers pyaudiowpatch for reliable WASAPI loopback on Windows,
+falls back to sounddevice if unavailable.
 """
+import logging
 import threading
 import numpy as np
 
 
 def list_loopback_devices() -> list[dict]:
     """
-    Query sounddevice for WASAPI loopback input devices.
+    Query for WASAPI loopback devices.
 
-    Returns list of dicts with keys: index, name, channels, sample_rate.
-    Returns empty list if sounddevice is not available or no loopback devices found.
+    Tries pyaudiowpatch first (reliable WASAPI loopback support),
+    falls back to sounddevice.
+
+    Returns list of dicts with keys: index, name, channels, sample_rate, backend.
+    Returns empty list if no suitable library or devices are found.
     """
+    # Try pyaudiowpatch first - proper WASAPI loopback support
+    try:
+        import pyaudiowpatch as pyaudio
+        devices = _list_devices_pyaudiowpatch(pyaudio)
+        if devices:
+            return devices
+    except ImportError:
+        pass
+
+    # Fallback to sounddevice
     try:
         import sounddevice as sd
+        return _list_devices_sounddevice(sd)
     except ImportError:
-        return []
+        pass
 
+    return []
+
+
+def _list_devices_pyaudiowpatch(pyaudio) -> list[dict]:
+    """List WASAPI loopback devices using pyaudiowpatch."""
+    devices = []
+    p = pyaudio.PyAudio()
+    try:
+        # pyaudiowpatch provides a generator for loopback devices
+        try:
+            for dev in p.get_loopback_device_info_generator():
+                devices.append({
+                    'index': dev['index'],
+                    'name': dev['name'],
+                    'channels': dev['maxInputChannels'],
+                    'sample_rate': int(dev['defaultSampleRate']),
+                    'backend': 'pyaudiowpatch',
+                })
+        except OSError:
+            # No WASAPI loopback devices available
+            pass
+    except Exception as e:
+        logging.warning(f"pyaudiowpatch device enumeration failed: {e}")
+    finally:
+        p.terminate()
+
+    return devices
+
+
+def _list_devices_sounddevice(sd) -> list[dict]:
+    """
+    List WASAPI input devices using sounddevice (fallback).
+
+    Note: sounddevice does NOT support true WASAPI loopback capture.
+    Only devices that already appear as input devices (e.g. Stereo Mix,
+    virtual audio cables) will work for system audio capture.
+    """
     devices = []
     try:
         host_apis = sd.query_hostapis()
@@ -31,7 +86,6 @@ def list_loopback_devices() -> list[dict]:
 
         all_devices = sd.query_devices()
         for i, dev in enumerate(all_devices):
-            # WASAPI loopback devices show up as input devices with hostapi matching WASAPI
             if dev['max_input_channels'] > 0:
                 is_wasapi = (wasapi_index is not None and dev['hostapi'] == wasapi_index)
                 is_loopback = 'loopback' in dev['name'].lower()
@@ -41,6 +95,7 @@ def list_loopback_devices() -> list[dict]:
                         'name': dev['name'],
                         'channels': dev['max_input_channels'],
                         'sample_rate': int(dev['default_samplerate']),
+                        'backend': 'sounddevice',
                     })
     except Exception:
         pass
@@ -67,7 +122,7 @@ class AudioBuffer:
         return self._channels
 
     def write(self, data: np.ndarray):
-        """Append audio chunk from sounddevice callback. Must be fast."""
+        """Append audio chunk from callback. Must be fast."""
         with self._lock:
             self._chunks.append(data.copy())
             # Update peak level for VU meter

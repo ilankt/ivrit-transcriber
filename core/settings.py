@@ -12,6 +12,7 @@ class Settings(BaseModel):
     device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
     output_format: str = "srt"  # "srt", "txt", or "both"
     default_output_filename: Optional[str] = None  # Not persisted per user preference
+    theme: str = "system"  # "system", "light", or "dark"
     live_audio_device: Optional[str] = None
     live_output_folder: Optional[str] = None
 
