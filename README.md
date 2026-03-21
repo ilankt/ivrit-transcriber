@@ -5,9 +5,11 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 ## Features
 
 - Transcribe Hebrew audio and video files (MP3, WAV, MP4, MKV, etc.)
+- **Live transcription** — capture system audio (WASAPI loopback) with word-by-word streaming captions
 - Outputs **SRT subtitles**, **plain text**, or both
 - Two model options: **Fast** (turbo) and **Accurate** (full)
 - **GPU acceleration** — NVIDIA CUDA and AMD Vulkan (auto-detected)
+- **Dark / Light / System theme** support
 - Voice Activity Detection (VAD)
 - Progress tracking with ETA
 - Custom output filenames
@@ -101,11 +103,23 @@ Then download the GGML models (see [Models](#for-amd-gpu-ggml-format) above).
 python app.py
 ```
 
+### File Transcription
+
 1. Click **Select File** and choose an audio or video file
 2. Set the output folder and options (model, format, device)
 3. Click **Start Transcription**
 
 The device dropdown auto-detects available GPUs. Select **Auto** to let the app choose the best option.
+
+### Live Transcription
+
+1. Switch to the **Live Transcription** tab
+2. Select a loopback audio device (your speakers or headphones)
+3. Set an output folder and click **Start Session**
+4. Play audio (YouTube, Zoom, etc.) — words appear in real-time as streaming captions
+5. Click **Stop** to end the session and save the transcript
+
+Live transcription uses the Fast model on CPU for low-latency response, with 1-second audio overlap between buffers and context prompting for accuracy.
 
 ## Building an Executable
 
@@ -124,7 +138,9 @@ core/
   settings.py               # Settings persistence (Pydantic)
   jobs.py                   # Job/Task state management
   worker.py                 # Transcription worker (QRunnable)
+  live_worker.py            # Live transcription worker (QThread)
 engine/
+  audio_capture.py           # WASAPI loopback device enumeration and buffering
   ffmpeg_helper.py           # FFmpeg wrapper (probe, extract, split)
   model_loader.py            # CTranslate2 model validation and loading
   gpu_detector.py            # NVIDIA CUDA and AMD Vulkan detection
@@ -132,6 +148,9 @@ engine/
   whisper_cpp_runner.py      # Chunk transcription (whisper.cpp subprocess)
   merger.py                  # Merge chunks into final SRT/TXT
   checkpoint.py              # Checkpoint support
+ui/
+  live_panel.py              # Live transcription UI panel
+  settings_panel.py          # Settings UI panel (theme, model, device)
 ```
 
 ## License
