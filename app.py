@@ -8,7 +8,8 @@ from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QGroupBox, QPushButton, QProgressBar,
                                QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
-                               QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel)
+                               QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
+                               QTabWidget)
 from PySide6.QtGui import QAction
 from PySide6.QtCore import QThreadPool, QTimer
 from core.settings import load_settings, save_settings, Settings
@@ -16,6 +17,7 @@ from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
 from core.worker import TranscriptionWorker
 from engine.gpu_detector import detect_all_gpus
+from ui.live_panel import LiveTranscriptionPanel
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -42,17 +44,32 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout()
         main_widget.setLayout(main_layout)
 
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
+
+        # --- Tab 1: File Transcription ---
+        file_tab = QWidget()
+        file_tab_layout = QVBoxLayout()
+        file_tab.setLayout(file_tab_layout)
+
         # Input Pane
-        self._create_input_pane(main_layout)
+        self._create_input_pane(file_tab_layout)
 
         # Status Pane
-        self._create_status_pane(main_layout)
-
-        # Options Pane
-        self._create_options_pane(main_layout)
+        self._create_status_pane(file_tab_layout)
 
         # Run Pane
-        self._create_run_pane(main_layout)
+        self._create_run_pane(file_tab_layout)
+
+        self.tab_widget.addTab(file_tab, "File Transcription")
+
+        # --- Tab 2: Live Transcription ---
+        self.live_panel = LiveTranscriptionPanel(self.settings)
+        self.tab_widget.addTab(self.live_panel, "Live Transcription")
+
+        # Options Pane (shared, below tabs)
+        self._create_options_pane(main_layout)
 
         self.setCentralWidget(main_widget)
 
@@ -241,6 +258,7 @@ class MainWindow(QMainWindow):
         self.settings.output_folder = self.output_folder_edit.text()
         self.settings.device = self.device_combo.currentData()
         self.settings.output_format = self.output_format_combo.currentData()
+        self.live_panel.save_settings()
         save_settings(self.settings)
 
     def _select_file(self):
@@ -537,6 +555,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_settings_from_ui()
+        # Stop live transcription session if active
+        self.live_panel.stop_session()
         # Cancel active worker before waiting for the thread pool to finish
         if self.active_worker:
             self.active_worker.cancel()

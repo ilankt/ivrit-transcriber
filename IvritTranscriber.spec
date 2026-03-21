@@ -16,6 +16,8 @@ a = Analysis(
         'tokenizers',
         'pydantic',
         'pydantic.deprecated.decorator',
+        'sounddevice',
+        '_sounddevice_data',
     ],
     hookspath=[],
     runtime_hooks=[],
