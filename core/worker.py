@@ -184,7 +184,8 @@ class TranscriptionWorker(QRunnable):
             self.total_audio_duration = sum(task.duration for task in self.job.tasks)
             self._emit_eta()
 
-            # Process tasks
+            # Process tasks with retry and skip-on-failure
+            failed_chunks = []
             for i, task in enumerate(self.job.tasks):
                 if self.is_canceled:
                     self._save_and_report_cancel()
@@ -198,73 +199,116 @@ class TranscriptionWorker(QRunnable):
                     f"Transcribing chunk {task.chunk_index + 1}/{len(self.job.tasks)} of {os.path.basename(self.job.original_file_path)}"
                 )
 
-                # Transcribe chunk using the selected engine
-                try:
-                    if engine == "whisper-cpp":
-                        def progress_cb(pct):
-                            self.signals.progress_updated.emit(i, pct / 100.0)
+                # Transcribe chunk with retry logic
+                max_retries = 1
+                chunk_success = False
+                text = ""
+                srt_segments = []
 
-                        text, srt_segments = transcribe_chunk_whispercpp(
-                            audio_path=task.chunk_path,
-                            model_path=ggml_path,
-                            binary_path=binary_path,
-                            beam_size=beam_size,
-                            vad_filter=self.settings.vad_enabled,
-                            use_gpu=True,
-                            progress_callback=progress_cb,
-                            cancel_event=self._cancel_event,
+                for attempt in range(max_retries + 1):
+                    if self.is_canceled:
+                        self._save_and_report_cancel()
+                        return
+
+                    try:
+                        if engine == "whisper-cpp":
+                            def progress_cb(pct, _i=i):
+                                self.signals.progress_updated.emit(_i, pct / 100.0)
+
+                            text, srt_segments = transcribe_chunk_whispercpp(
+                                audio_path=task.chunk_path,
+                                model_path=ggml_path,
+                                binary_path=binary_path,
+                                beam_size=beam_size,
+                                vad_filter=self.settings.vad_enabled,
+                                use_gpu=True,
+                                progress_callback=progress_cb,
+                                cancel_event=self._cancel_event,
+                            )
+                        else:
+                            text, srt_segments = self._run_cancellable(
+                                transcribe_chunk,
+                                task.chunk_path, model, "he", beam_size, self.settings.vad_enabled,
+                                cancel_event=self._cancel_event,
+                            )
+                        chunk_success = True
+                        break
+                    except InterruptedError:
+                        self._save_and_report_cancel()
+                        return
+                    except Exception as chunk_error:
+                        if attempt < max_retries:
+                            logging.warning(
+                                f"Chunk {task.chunk_index + 1}/{len(self.job.tasks)} failed "
+                                f"(attempt {attempt + 1}), retrying: {chunk_error}"
+                            )
+                            self.signals.task_status_updated.emit(
+                                i, TaskStatus.RUNNING,
+                                f"Retrying chunk {task.chunk_index + 1}/{len(self.job.tasks)}..."
+                            )
+                        else:
+                            logging.error(
+                                f"Chunk {task.chunk_index + 1}/{len(self.job.tasks)} failed "
+                                f"after {max_retries + 1} attempts: {chunk_error}"
+                            )
+                            failed_chunks.append(task.chunk_index + 1)
+
+                if self.is_canceled:
+                    if chunk_success:
+                        task.text = text
+                        task.srt_segments = srt_segments
+                        task.status = TaskStatus.DONE
+                        base_name = self._get_base_name()
+                        save_chunk_checkpoint(
+                            self.job.output_dir, base_name, task.chunk_index,
+                            text, srt_segments, task.duration
                         )
-                    else:
-                        text, srt_segments = self._run_cancellable(
-                            transcribe_chunk,
-                            task.chunk_path, model, "he", beam_size, self.settings.vad_enabled,
-                            cancel_event=self._cancel_event,
-                        )
-                except InterruptedError:
                     self._save_and_report_cancel()
                     return
 
-                if self.is_canceled:
+                if chunk_success:
                     task.text = text
                     task.srt_segments = srt_segments
                     task.status = TaskStatus.DONE
+
                     base_name = self._get_base_name()
                     save_chunk_checkpoint(
                         self.job.output_dir, base_name, task.chunk_index,
                         text, srt_segments, task.duration
                     )
-                    self._save_and_report_cancel()
-                    return
+                    logging.info(f"Saved checkpoint for chunk {task.chunk_index + 1}/{len(self.job.tasks)}")
 
-                task.text = text
-                task.srt_segments = srt_segments
-                task.status = TaskStatus.DONE
+                    merge_checkpoints_to_files(self.job.output_dir, base_name, output_format=self.settings.output_format)
+                    logging.info(f"Merged {task.chunk_index + 1} completed chunks")
 
-                base_name = self._get_base_name()
-                save_chunk_checkpoint(
-                    self.job.output_dir, base_name, task.chunk_index,
-                    text, srt_segments, task.duration
-                )
-                logging.info(f"Saved checkpoint for chunk {task.chunk_index + 1}/{len(self.job.tasks)}")
-
-                merge_checkpoints_to_files(self.job.output_dir, base_name, output_format=self.settings.output_format)
-                logging.info(f"Merged {task.chunk_index + 1} completed chunks")
-
-                self.signals.task_status_updated.emit(
-                    i, TaskStatus.DONE,
-                    f"Finished chunk {task.chunk_index + 1}/{len(self.job.tasks)} of {os.path.basename(self.job.original_file_path)}"
-                )
-                self.signals.progress_updated.emit(i, 1.0)
+                    self.signals.task_status_updated.emit(
+                        i, TaskStatus.DONE,
+                        f"Finished chunk {task.chunk_index + 1}/{len(self.job.tasks)} of {os.path.basename(self.job.original_file_path)}"
+                    )
+                    self.signals.progress_updated.emit(i, 1.0)
+                else:
+                    self.signals.task_status_updated.emit(
+                        i, TaskStatus.ERROR,
+                        f"Chunk {task.chunk_index + 1}/{len(self.job.tasks)} failed, skipping"
+                    )
+                    self.signals.progress_updated.emit(i, 1.0)
 
                 self.processed_audio_duration += task.duration
                 self._emit_eta()
 
-            # All chunks completed
+            # All chunks processed
             cleanup_temp = True
             base_name = self._get_base_name()
-            self.signals.job_status_updated.emit(JobStatus.DONE, "Job completed")
             total_time = time.time() - self.start_time
-            logging.info(f"Transcription for {self.job.original_file_path} completed in {total_time:.2f} seconds.")
+
+            if failed_chunks:
+                chunk_list = ', '.join(str(c) for c in failed_chunks)
+                msg = f"Completed with {len(failed_chunks)} failed chunk(s) (chunks {chunk_list}). Partial results saved."
+                self.signals.job_status_updated.emit(JobStatus.DONE, msg)
+                logging.warning(f"Transcription completed with errors. Failed chunks: {failed_chunks}. Total time: {total_time:.2f}s")
+            else:
+                self.signals.job_status_updated.emit(JobStatus.DONE, "Job completed")
+                logging.info(f"Transcription for {self.job.original_file_path} completed in {total_time:.2f} seconds.")
             self._cleanup_checkpoint_files(base_name)
 
         except Exception as e:

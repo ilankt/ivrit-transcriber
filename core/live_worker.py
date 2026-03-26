@@ -26,11 +26,11 @@ from core.worker import get_model_path
 
 
 # Minimum buffer duration before transcription (seconds)
-BUFFER_DURATION_SEC = 3
+BUFFER_DURATION_SEC = 2
 # Poll interval while waiting for buffer to fill (seconds)
 POLL_INTERVAL_SEC = 0.2
 # Overlap duration between consecutive buffers (seconds)
-OVERLAP_SEC = 1.0
+OVERLAP_SEC = 0.5
 
 
 class LiveTranscriptionWorker(QThread):
@@ -66,17 +66,24 @@ class LiveTranscriptionWorker(QThread):
 
     def run(self):
         model = None
+        cleanup_fn = None
 
         try:
-            self.status_updated.emit("Loading model...")
             beam_size = 1
+
+            # Start audio capture IMMEDIATELY so no audio is lost during model loading
+            self.status_updated.emit("Starting audio capture...")
+            audio_buffer, cleanup_fn = self._start_capture()
+            self._session_start_time = datetime.now()
+
+            # Load model while audio accumulates in the buffer
+            self.status_updated.emit("Loading model (recording audio)...")
 
             model_path = get_model_path("Fast")
             if not validate_model_path(model_path):
                 self.error_occurred.emit(
                     f"Invalid model path: {model_path}. Required model files are missing."
                 )
-                self.session_finished.emit()
                 return
 
             device_for_loading = self.settings.device
@@ -91,22 +98,31 @@ class LiveTranscriptionWorker(QThread):
             )
             if error_message:
                 self.error_occurred.emit(f"Model loading failed: {error_message}")
-                self.session_finished.emit()
                 return
 
-            if self.backend == 'pyaudiowpatch':
-                self._run_with_pyaudiowpatch(model, beam_size)
-            else:
-                self._run_with_sounddevice(model, beam_size)
+            # Model ready — start transcribing (buffer already has audio from loading period)
+            self.status_updated.emit("Recording...")
+            self._capture_loop(audio_buffer, model, beam_size)
+
+            self.status_updated.emit("Session ended")
 
         except Exception as e:
             logging.error(f"Live transcription error: {e}")
             self.error_occurred.emit(str(e))
         finally:
+            if cleanup_fn:
+                cleanup_fn()
             self.session_finished.emit()
 
-    def _run_with_pyaudiowpatch(self, model, beam_size):
-        """Capture audio using pyaudiowpatch (proper WASAPI loopback)."""
+    def _start_capture(self):
+        """Start audio capture and return (audio_buffer, cleanup_fn)."""
+        if self.backend == 'pyaudiowpatch':
+            return self._start_capture_pyaudiowpatch()
+        else:
+            return self._start_capture_sounddevice()
+
+    def _start_capture_pyaudiowpatch(self):
+        """Start capture using pyaudiowpatch. Returns (AudioBuffer, cleanup_fn)."""
         import pyaudiowpatch as pyaudio
 
         p = pyaudio.PyAudio()
@@ -119,45 +135,36 @@ class LiveTranscriptionWorker(QThread):
             audio_buffer.write(audio)
             return (None, pyaudio.paContinue)
 
-        try:
-            self.status_updated.emit("Starting audio capture...")
-            stream = p.open(
-                format=pyaudio.paFloat32,
-                channels=self.device_channels,
-                rate=self.device_sample_rate,
-                input=True,
-                input_device_index=self.device_index,
-                frames_per_buffer=1024,
-                stream_callback=audio_callback,
-            )
-            stream.start_stream()
+        stream = p.open(
+            format=pyaudio.paFloat32,
+            channels=self.device_channels,
+            rate=self.device_sample_rate,
+            input=True,
+            input_device_index=self.device_index,
+            frames_per_buffer=1024,
+            stream_callback=audio_callback,
+        )
+        stream.start_stream()
 
-            self._session_start_time = datetime.now()
-            self.status_updated.emit("Recording...")
-
-            try:
-                self._capture_loop(audio_buffer, model, beam_size)
-            finally:
-                stream.stop_stream()
-                stream.close()
-        finally:
+        def cleanup():
+            stream.stop_stream()
+            stream.close()
             p.terminate()
 
-        self.status_updated.emit("Session ended")
+        return audio_buffer, cleanup
 
-    def _run_with_sounddevice(self, model, beam_size):
-        """Capture audio using sounddevice (fallback, limited loopback support)."""
+    def _start_capture_sounddevice(self):
+        """Start capture using sounddevice. Returns (AudioBuffer, cleanup_fn)."""
         try:
             import sounddevice as sd
         except ImportError:
-            self.error_occurred.emit(
+            raise RuntimeError(
                 "No audio capture library available.\n"
                 "Install pyaudiowpatch for WASAPI loopback:\n"
                 "  pip install pyaudiowpatch\n\n"
                 "Or install sounddevice as fallback:\n"
                 "  pip install sounddevice"
             )
-            return
 
         audio_buffer = AudioBuffer(self.device_sample_rate, self.device_channels)
 
@@ -166,7 +173,6 @@ class LiveTranscriptionWorker(QThread):
                 logging.warning(f"Audio capture status: {status}")
             audio_buffer.write(indata)
 
-        self.status_updated.emit("Starting audio capture...")
         stream = sd.InputStream(
             device=self.device_index,
             samplerate=self.device_sample_rate,
@@ -175,14 +181,13 @@ class LiveTranscriptionWorker(QThread):
             callback=audio_callback,
             blocksize=1024,
         )
+        stream.start()
 
-        self._session_start_time = datetime.now()
+        def cleanup():
+            stream.stop()
+            stream.close()
 
-        with stream:
-            self.status_updated.emit("Recording...")
-            self._capture_loop(audio_buffer, model, beam_size)
-
-        self.status_updated.emit("Session ended")
+        return audio_buffer, cleanup
 
     def _capture_loop(self, audio_buffer, model, beam_size):
         """Main capture/transcription loop with overlap and context."""
@@ -204,6 +209,11 @@ class LiveTranscriptionWorker(QThread):
                 continue
 
             new_duration = len(raw_audio) / self.device_sample_rate
+            raw_peak = float(np.max(np.abs(raw_audio)))
+            logging.debug(
+                f"Live capture: {new_duration:.1f}s, peak={raw_peak:.4f}, "
+                f"shape={raw_audio.shape}"
+            )
 
             # Prepend overlap from previous buffer
             if overlap_audio is not None:
@@ -248,6 +258,7 @@ class LiveTranscriptionWorker(QThread):
 
             if all_words:
                 wall_time_str = buffer_wall_start.strftime("%H:%M:%S")
+                logging.debug(f"Emitting {len(all_words)} words at {wall_time_str}")
                 self.words_ready.emit(wall_time_str, all_words)
 
                 # Store full segments for session save
@@ -258,6 +269,11 @@ class LiveTranscriptionWorker(QThread):
 
                 # Update context prompt for next buffer (last ~200 chars)
                 last_prompt = full_text[-200:]
+            else:
+                logging.debug(
+                    f"No words from buffer ({len(segments)} raw segments, "
+                    f"{len(new_segments)} after overlap filter)"
+                )
 
             elapsed_audio_time += new_duration
             self.status_updated.emit("Recording...")
@@ -301,8 +317,12 @@ class LiveTranscriptionWorker(QThread):
         """
         audio_16k = resample_to_16k_mono(raw_audio, self.device_sample_rate)
 
+        peak = float(np.max(np.abs(audio_16k)))
+        logging.debug(f"Live buffer: {len(audio_16k)} samples, peak={peak:.4f}")
+
         # Skip near-silent buffers
-        if np.max(np.abs(audio_16k)) < 0.01:
+        if peak < 0.001:
+            logging.debug("Skipping silent buffer")
             return []
 
         segments = []
@@ -323,8 +343,11 @@ class LiveTranscriptionWorker(QThread):
                 text = seg.text.strip()
                 if text:
                     segments.append((seg.start, seg.end, text))
+
+            logging.debug(f"Transcribed {len(segments)} segments")
         except Exception as e:
-            logging.error(f"Transcription error: {e}")
+            logging.error(f"Transcription error: {e}", exc_info=True)
+            self.error_occurred.emit(f"Transcription error: {e}")
 
         return segments
 

@@ -4,6 +4,7 @@ whisper.cpp subprocess runner for AMD GPU (Vulkan) transcription.
 Calls the whisper-cli binary as a subprocess and parses its output.
 """
 import json
+import logging
 import os
 import re
 import subprocess
@@ -171,7 +172,8 @@ def transcribe_chunk_whispercpp(
     stderr_text = ''.join(stderr_lines)
 
     if process.returncode != 0:
-        raise RuntimeError(f"whisper-cli failed (exit code {process.returncode}):\n{stderr_text[:500]}")
+        logging.error(f"whisper-cli failed (exit code {process.returncode}). Full stderr:\n{stderr_text}")
+        raise RuntimeError(f"whisper-cli failed (exit code {process.returncode}):\n{stderr_text[:2000]}")
 
     # Check for errors in stderr even if exit code is 0
     if 'error:' in stderr_text.lower() and 'unknown argument' in stderr_text.lower():

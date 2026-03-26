@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
                                QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
                                QTabWidget)
-from PySide6.QtGui import QAction
-from PySide6.QtCore import QThreadPool, QTimer, Qt
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QThread, QThreadPool, QTimer, Qt, Signal
 from core.settings import load_settings, save_settings, Settings
 from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
@@ -36,11 +36,91 @@ def apply_theme(theme: str):
         hints.setColorScheme(Qt.ColorScheme.Unknown)
 
 
+def format_duration(seconds):
+    """Format duration in seconds to HH:MM:SS."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02}:{m:02}:{s:02}"
+
+
+class FileLoadWorker(QThread):
+    """Worker thread for loading and processing media files without blocking the UI."""
+    status_updated = Signal(str)
+    file_info_ready = Signal(float, bool)  # duration, is_video
+    finished = Signal(object)  # Job object
+    error = Signal(str)
+
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self._temp_dir = None
+
+    def run(self):
+        try:
+            self.status_updated.emit("Probing file...")
+            duration, media_info = probe_media(self.file_path)
+            if duration is None:
+                self.error.emit(f"Could not probe file: {media_info}")
+                return
+
+            is_video = bool(media_info)
+            self.file_info_ready.emit(duration, is_video)
+
+            self._temp_dir = tempfile.mkdtemp(prefix="ivrit_transcriber_job_")
+
+            audio_to_split_path = self.file_path
+
+            if is_video:
+                self.status_updated.emit("Extracting audio from video...")
+                extracted_audio_path = os.path.join(
+                    self._temp_dir, os.path.basename(self.file_path) + ".wav"
+                )
+                err = extract_audio(self.file_path, extracted_audio_path)
+                if err:
+                    raise RuntimeError(f"Audio extraction failed: {err}")
+                audio_to_split_path = extracted_audio_path
+
+            self.status_updated.emit("Splitting audio into chunks...")
+            chunk_paths, err = split_audio(audio_to_split_path, 1, self._temp_dir)
+            if err:
+                raise RuntimeError(f"Audio splitting failed: {err}")
+
+            self.status_updated.emit("Preparing chunks...")
+            tasks = []
+            for i, chunk_path in enumerate(chunk_paths):
+                chunk_duration, _ = probe_media(chunk_path)
+                if chunk_duration is None:
+                    chunk_duration = 60
+                task = Task(self.file_path, chunk_path, i)
+                task.duration = chunk_duration
+                tasks.append(task)
+
+            job = Job(self.file_path, tasks)
+            job.temp_dir = self._temp_dir
+            self._temp_dir = None  # Job now owns the temp dir
+
+            self.finished.emit(job)
+
+        except Exception as e:
+            self.error.emit(str(e))
+            if self._temp_dir and os.path.exists(self._temp_dir):
+                shutil.rmtree(self._temp_dir)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ivrit Transcriber")
         self.resize(800, 600)
+
+        # Set window icon
+        icon_path = os.path.join(
+            getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))),
+            'ICON.png'
+        )
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.settings = load_settings()
         self.current_job = None  # Single Job object or None
@@ -241,72 +321,45 @@ class MainWindow(QMainWindow):
         # Clear custom filename when selecting new file
         self.output_filename_edit.setText("")
 
-        # Reset UI
+        # Update UI to show loading state
+        self.file_path_edit.setText(file)
+        self.file_type_label.setText("Loading...")
+        self.file_duration_label.setText("Loading...")
         self.status_label.setText("Processing file...")
         self.progress_bar.setValue(0)
         self.eta_label.setText("")
+        self.select_file_button.setEnabled(False)
+        self.start_button.setEnabled(False)
 
-        temp_job_dir = None
+        # Start background worker to process the file
+        self._file_load_worker = FileLoadWorker(file, self)
+        self._file_load_worker.status_updated.connect(self._on_file_load_status)
+        self._file_load_worker.file_info_ready.connect(self._on_file_info_ready)
+        self._file_load_worker.finished.connect(self._on_file_loaded)
+        self._file_load_worker.error.connect(self._on_file_load_error)
+        self._file_load_worker.start()
 
-        try:
-            duration, media_info = probe_media(file)
-            if duration is None:
-                QMessageBox.warning(self, "Error", f"Could not probe file {os.path.basename(file)}: {media_info}")
-                self.file_path_edit.setText("")
-                self.file_type_label.setText("-")
-                self.file_duration_label.setText("-")
-                self.status_label.setText("Error: Could not probe file")
-                return
+    def _on_file_load_status(self, message):
+        self.status_label.setText(message)
 
-            temp_job_dir = tempfile.mkdtemp(prefix="ivrit_transcriber_job_")
+    def _on_file_info_ready(self, duration, is_video):
+        self.file_type_label.setText("Video" if is_video else "Audio")
+        self.file_duration_label.setText(format_duration(duration))
 
-            # Update UI with file info
-            self.file_path_edit.setText(file)
-            self.file_type_label.setText("Video" if media_info else "Audio")
-            self.file_duration_label.setText(f"{duration:.2f}s")
+    def _on_file_loaded(self, job):
+        self.current_job = job
+        self.status_label.setText("Ready to transcribe")
+        self.select_file_button.setEnabled(True)
+        self.start_button.setEnabled(True)
 
-            audio_to_split_path = file
-
-            if media_info:  # It's a video, extract audio
-                self.status_label.setText("Extracting audio...")
-                extracted_audio_path = os.path.join(temp_job_dir, os.path.basename(file) + ".wav")
-                error = extract_audio(file, extracted_audio_path)
-                if error:
-                    raise RuntimeError(f"Audio extraction failed: {error}")
-                audio_to_split_path = extracted_audio_path
-
-            # Split audio into chunks
-            self.status_label.setText("Splitting audio...")
-            chunk_paths, error = split_audio(audio_to_split_path, 1, temp_job_dir)  # Hardcoded 1 minute
-            if error:
-                raise RuntimeError(f"Audio splitting failed: {error}")
-
-            tasks = []
-            for i, chunk_path in enumerate(chunk_paths):
-                chunk_duration, _ = probe_media(chunk_path)
-                if chunk_duration is None:
-                    chunk_duration = 60  # Default to 1 minute as a fallback
-                task = Task(file, chunk_path, i)
-                task.duration = chunk_duration
-                tasks.append(task)
-
-            # Create job
-            job = Job(file, tasks)
-            job.temp_dir = temp_job_dir
-            self.current_job = job
-
-            self.status_label.setText("Ready to transcribe")
-
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to process {os.path.basename(file)}: {str(e)}")
-            # Clean up temp directory if it was created
-            if temp_job_dir and os.path.exists(temp_job_dir):
-                shutil.rmtree(temp_job_dir)
-            self.file_path_edit.setText("")
-            self.file_type_label.setText("-")
-            self.file_duration_label.setText("-")
-            self.status_label.setText("Error processing file")
-            self.current_job = None
+    def _on_file_load_error(self, message):
+        QMessageBox.warning(self, "Error", f"Failed to process file: {message}")
+        self.file_path_edit.setText("")
+        self.file_type_label.setText("-")
+        self.file_duration_label.setText("-")
+        self.status_label.setText("Error processing file")
+        self.select_file_button.setEnabled(True)
+        self.current_job = None
 
     def _browse_output_folder(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -520,6 +573,9 @@ class MainWindow(QMainWindow):
         self._save_settings_from_ui()
         # Stop live transcription session if active
         self.live_panel.stop_session()
+        # Wait for file load worker if running
+        if hasattr(self, '_file_load_worker') and self._file_load_worker is not None:
+            self._file_load_worker.wait(5000)
         # Cancel active worker before waiting for the thread pool to finish
         if self.active_worker:
             self.active_worker.cancel()
@@ -529,6 +585,11 @@ class MainWindow(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[logging.StreamHandler()],
+    )
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)

@@ -8,6 +8,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('C:/Users/ilank/AppData/Local/Programs/Python/Python312/Lib/site-packages/faster_whisper/assets', 'faster_whisper/assets'),
+        ('ICON.png', '.'),
     ],
     hiddenimports=[
         'ctranslate2',
@@ -49,6 +50,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon='icon.ico',
     runtime_tmpdir=None,
 )
 
