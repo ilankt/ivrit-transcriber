@@ -262,6 +262,8 @@ class SettingsPanel(QWidget):
 
         to_delete = []
         for entry in os.scandir(base_models_dir):
+            if entry.name.startswith('.'):
+                continue  # skip .cache and other huggingface_hub internal directories
             if entry.name not in known:
                 to_delete.append(entry.path)
 
