@@ -4,14 +4,14 @@ from pydantic import BaseModel
 from typing import Optional
 
 class Settings(BaseModel):
-    model_type: str = "Fast"
+    language: str = "he"  # "he" (Hebrew) or "en" (English)
     vad_enabled: bool = True
     threads: int = 0
     compute_type: str = "auto"
     output_folder: Optional[str] = None
     device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
     output_format: str = "srt"  # "srt", "txt", or "both"
-    default_output_filename: Optional[str] = None  # Not persisted per user preference
+    default_output_filename: Optional[str] = None
     theme: str = "system"  # "system", "light", or "dark"
     live_audio_device: Optional[str] = None
     live_output_folder: Optional[str] = None

@@ -1,11 +1,11 @@
 """
 Settings Panel UI.
 
-Provides shared application settings: theme, model, VAD, device, output format.
+Provides shared application settings: theme, language, VAD, device, output format.
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout,
-    QComboBox, QCheckBox,
+    QComboBox, QCheckBox, QLabel,
 )
 from PySide6.QtCore import Signal
 
@@ -43,9 +43,20 @@ class SettingsPanel(QWidget):
         transcription_group = QGroupBox("Transcription")
         transcription_layout = QFormLayout()
 
-        self.model_type_combo = QComboBox()
-        self.model_type_combo.addItems(["Fast", "Accurate"])
-        transcription_layout.addRow("Model:", self.model_type_combo)
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Hebrew", "he")
+        self.language_combo.addItem("English", "en")
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        transcription_layout.addRow("Language:", self.language_combo)
+
+        self.english_info_label = QLabel(
+            "English uses standard OpenAI Whisper large-v3.\n"
+            "Model will be downloaded on first use (~3 GB)."
+        )
+        self.english_info_label.setWordWrap(True)
+        self.english_info_label.setStyleSheet("color: gray; font-size: 9pt;")
+        self.english_info_label.setVisible(False)
+        transcription_layout.addRow("", self.english_info_label)
 
         self.vad_checkbox = QCheckBox("Enable VAD (Voice Activity Detection)")
         self.vad_checkbox.setChecked(True)
@@ -101,8 +112,12 @@ class SettingsPanel(QWidget):
                 self.theme_combo.setCurrentIndex(i)
                 break
 
-        # Model
-        self.model_type_combo.setCurrentText(self.settings.model_type)
+        # Language
+        for i in range(self.language_combo.count()):
+            if self.language_combo.itemData(i) == self.settings.language:
+                self.language_combo.setCurrentIndex(i)
+                break
+        self.english_info_label.setVisible(self.settings.language == "en")
 
         # VAD
         self.vad_checkbox.setChecked(self.settings.vad_enabled)
@@ -122,7 +137,7 @@ class SettingsPanel(QWidget):
     def save_settings(self):
         """Write current UI values back to the settings object."""
         self.settings.theme = self.theme_combo.currentData()
-        self.settings.model_type = self.model_type_combo.currentText()
+        self.settings.language = self.language_combo.currentData()
         self.settings.vad_enabled = self.vad_checkbox.isChecked()
         self.settings.device = self.device_combo.currentData()
         self.settings.output_format = self.output_format_combo.currentData()
@@ -131,3 +146,7 @@ class SettingsPanel(QWidget):
         theme = self.theme_combo.currentData()
         if theme:
             self.theme_changed.emit(theme)
+
+    def _on_language_changed(self):
+        lang = self.language_combo.currentData()
+        self.english_info_label.setVisible(lang == "en")

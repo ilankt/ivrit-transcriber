@@ -21,8 +21,8 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from engine.audio_capture import AudioBuffer, resample_to_16k_mono
-from engine.model_loader import load_whisper_model, validate_model_path
-from core.worker import get_model_path
+from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
+from core.worker import get_base_path
 
 
 # Minimum buffer duration before transcription (seconds)
@@ -69,7 +69,7 @@ class LiveTranscriptionWorker(QThread):
         cleanup_fn = None
 
         try:
-            beam_size = 1
+            beam_size = 3
 
             # Start audio capture IMMEDIATELY so no audio is lost during model loading
             self.status_updated.emit("Starting audio capture...")
@@ -79,7 +79,7 @@ class LiveTranscriptionWorker(QThread):
             # Load model while audio accumulates in the buffer
             self.status_updated.emit("Loading model (recording audio)...")
 
-            model_path = get_model_path("Fast")
+            model_path = resolve_model_path(self.settings.language, "faster-whisper", get_base_path())
             if not validate_model_path(model_path):
                 self.error_occurred.emit(
                     f"Invalid model path: {model_path}. Required model files are missing."
@@ -329,7 +329,7 @@ class LiveTranscriptionWorker(QThread):
 
         try:
             kwargs = dict(
-                language="he",
+                language=self.settings.language,
                 beam_size=beam_size,
                 vad_filter=self.settings.vad_enabled,
             )

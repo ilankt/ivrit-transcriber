@@ -98,9 +98,9 @@ class LiveTranscriptionPanel(QWidget):
         self.transcript_edit = QTextEdit()
         self.transcript_edit.setReadOnly(True)
         self.transcript_edit.setMinimumHeight(200)
-        # Right-to-left for Hebrew
         self.transcript_edit.setStyleSheet("QTextEdit { font-size: 12pt; }")
-        self.transcript_edit.setLayoutDirection(Qt.RightToLeft)
+        direction = Qt.RightToLeft if self.settings.language == "he" else Qt.LeftToRight
+        self.transcript_edit.setLayoutDirection(direction)
         transcript_layout.addWidget(self.transcript_edit)
 
         clear_row = QHBoxLayout()

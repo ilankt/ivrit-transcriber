@@ -36,8 +36,8 @@ Ivrit Transcriber is a desktop application for transcribing Hebrew audio and vid
 - **Sequential Processing**: Jobs are processed one at a time (`QThreadPool.setMaxThreadCount(1)`)
 - **Temporary Storage**: Each job creates a temp directory for intermediate files (audio extraction, chunks)
 - **Chunk Duration**: Audio is split into 1-minute chunks (hardcoded in `app.py`)
-- **Model Selection**: "Fast" uses `ivrit-large-v3-turbo-ct2` with beam_size=1, "Accurate" uses `ivrit-large-v3-ct2` with beam_size=3
-- **Model Location**: Models are expected in `Models/` subdirectory relative to the application (supports PyInstaller packaging via `get_base_path()` in `worker.py`)
+- **Language Selection**: Hebrew uses bundled ivrit fine-tuned models; English uses standard Whisper large-v3 downloaded on first use. Language resolved via `engine/model_loader.py:resolve_model_path()`. beam_size is hardcoded to 3.
+- **Model Location**: Models are expected in `Models/` subdirectory relative to the application (supports PyInstaller packaging via `get_base_path()` in `worker.py`). On-demand English models downloaded via `engine/model_downloader.py` using `huggingface_hub`.
 - **Device Selection**: User can choose Auto/CPU/NVIDIA GPU/AMD GPU via UI. GPU options only shown if compatible hardware is detected. Device setting saved in settings.json.
 - **Dual Engine**: NVIDIA/CPU uses faster-whisper (CTranslate2 models). AMD uses whisper.cpp with Vulkan (GGML models). Engine is auto-selected based on device setting.
 - **whisper.cpp Integration**: Called as subprocess (like FFmpeg). Binary expected in `Binaries/` or system PATH. GGML models expected in `Models/`.
@@ -53,7 +53,7 @@ python app.py
 ```bash
 pip install -r requirements.txt
 ```
-Dependencies: PySide6, faster-whisper, ffmpeg-python, tqdm, pydantic
+Dependencies: PySide6, faster-whisper, ffmpeg-python, tqdm, pydantic, huggingface_hub
 
 Optional: PyTorch with CUDA support for GPU acceleration (if not installed, GPU option will not be available)
 
@@ -82,7 +82,7 @@ The worker emits Qt signals to update the UI:
 
 ### Settings Management
 Settings are loaded at startup and saved on app exit. Configurable settings include:
-- **Model Type**: "Fast" (turbo model, beam_size=1) or "Accurate" (full model, beam_size=3)
+- **Language**: "Hebrew" (`he`) or "English" (`en`). English uses standard Whisper large-v3 and downloads on first use (~3 GB).
 - **Device**: "Auto" (try GPU, fallback to CPU), "CPU Only", or "GPU Only" (only shown if NVIDIA CUDA detected)
 - **VAD**: Voice Activity Detection can be toggled on/off
 - **Output Folder**: Last used output folder is remembered

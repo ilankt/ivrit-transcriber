@@ -9,15 +9,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QGroupBox, QPushButton, QProgressBar,
                                QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
                                QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
-                               QTabWidget)
-from PySide6.QtGui import QAction, QIcon
+                               QTabWidget, QProgressDialog, QSplashScreen)
+from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtCore import QThread, QThreadPool, QTimer, Qt, Signal
 from core.settings import load_settings, save_settings, Settings
 from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
-from core.worker import TranscriptionWorker
-from engine.gpu_detector import detect_all_gpus
-from ui.live_panel import LiveTranscriptionPanel
 from ui.settings_panel import SettingsPanel
 
 
@@ -42,6 +39,23 @@ def format_duration(seconds):
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02}:{m:02}:{s:02}"
+
+
+def _get_icon_path() -> str:
+    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_dir, 'ICON.png')
+
+
+class StartupWorker(QThread):
+    """Detects GPUs in a background thread so the splash shows immediately."""
+    status_updated = Signal(str)
+    gpu_info_ready = Signal(object)  # dict from detect_all_gpus()
+
+    def run(self):
+        from engine.gpu_detector import detect_all_gpus
+        self.status_updated.emit("Detecting GPUs…")
+        gpu_info = detect_all_gpus()
+        self.gpu_info_ready.emit(gpu_info)
 
 
 class FileLoadWorker(QThread):
@@ -108,45 +122,94 @@ class FileLoadWorker(QThread):
                 shutil.rmtree(self._temp_dir)
 
 
+class ModelDownloadWorker(QThread):
+    """Downloads a model from HuggingFace in a background thread."""
+    progress_updated = Signal(int)   # 0-100
+    finished = Signal(bool, str)     # success, message
+
+    def __init__(self, download_info: dict, model_path: str, parent=None):
+        super().__init__(parent)
+        self.download_info = download_info
+        self.model_path = model_path
+        self._canceled = False
+
+    def cancel(self):
+        self._canceled = True
+
+    def run(self):
+        try:
+            from engine.model_downloader import download_ct2_model, download_ggml_file
+
+            def progress_cb(pct):
+                self.progress_updated.emit(pct)
+
+            def cancel_check():
+                return self._canceled
+
+            if self.download_info["type"] == "ct2":
+                download_ct2_model(
+                    self.download_info["repo_id"],
+                    self.model_path,
+                    progress_cb,
+                    cancel_check,
+                )
+            else:
+                dest_dir = os.path.dirname(self.model_path)
+                download_ggml_file(
+                    self.download_info["repo_id"],
+                    self.download_info["filename"],
+                    dest_dir,
+                    progress_cb,
+                    cancel_check,
+                )
+            self.finished.emit(True, "")
+        except InterruptedError:
+            self._cleanup()
+            self.finished.emit(False, "canceled")
+        except Exception as e:
+            self._cleanup()
+            self.finished.emit(False, str(e))
+
+    def _cleanup(self):
+        if os.path.isdir(self.model_path):
+            shutil.rmtree(self.model_path, ignore_errors=True)
+        elif os.path.isfile(self.model_path):
+            try:
+                os.remove(self.model_path)
+            except Exception:
+                pass
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, gpu_info: dict):
         super().__init__()
         self.setWindowTitle("Ivrit Transcriber")
         self.resize(800, 600)
 
-        # Set window icon
-        icon_path = os.path.join(
-            getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))),
-            'ICON.png'
-        )
+        icon_path = _get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         self.settings = load_settings()
-        self.current_job = None  # Single Job object or None
-        self.active_worker = None  # Single worker or None
+        self.gpu_info = gpu_info
+        self.current_job = None
+        self.active_worker = None
+        self.live_panel = None  # built lazily on first tab access
         self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(1)  # Process jobs sequentially
+        self.thread_pool.setMaxThreadCount(1)
 
-        # Detect GPU availability
-        self.gpu_info = detect_all_gpus()
-
-        # Apply saved theme
         apply_theme(self.settings.theme)
 
-        # Menu bar
         self._create_menu_bar()
 
-        # Main widget and layout
         main_widget = QWidget()
         main_layout = QVBoxLayout()
         main_widget.setLayout(main_layout)
 
-        # Tab widget
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
 
-        # --- Tab 1: File Transcription ---
+        # Tab 0: File Transcription
         file_tab = QWidget()
         file_tab_layout = QVBoxLayout()
         file_tab.setLayout(file_tab_layout)
@@ -158,11 +221,12 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.addTab(file_tab, "File Transcription")
 
-        # --- Tab 2: Live Transcription ---
-        self.live_panel = LiveTranscriptionPanel(self.settings)
-        self.tab_widget.addTab(self.live_panel, "Live Transcription")
+        # Tab 1: Live Transcription — placeholder until first click
+        self._live_placeholder = QWidget()
+        self.tab_widget.addTab(self._live_placeholder, "Live Transcription")
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        # --- Tab 3: Settings ---
+        # Tab 2: Settings
         self.settings_panel = SettingsPanel(self.settings, self.gpu_info)
         self.settings_panel.theme_changed.connect(self._on_theme_changed)
         self.tab_widget.addTab(self.settings_panel, "Settings")
@@ -170,6 +234,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
         self._load_settings_to_ui()
+
+    def _on_tab_changed(self, index: int):
+        """Lazily build the Live Transcription panel on first visit."""
+        if index == 1 and self.live_panel is None:
+            from ui.live_panel import LiveTranscriptionPanel
+            self.live_panel = LiveTranscriptionPanel(self.settings)
+            layout = QVBoxLayout(self._live_placeholder)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.live_panel)
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
@@ -192,7 +265,6 @@ class MainWindow(QMainWindow):
         input_group_box = QGroupBox("Input File")
         input_layout = QFormLayout()
 
-        # File path display with select button
         file_row_layout = QHBoxLayout()
         self.file_path_edit = QLineEdit()
         self.file_path_edit.setReadOnly(True)
@@ -202,7 +274,6 @@ class MainWindow(QMainWindow):
         file_row_layout.addWidget(self.select_file_button)
         input_layout.addRow("File:", file_row_layout)
 
-        # File info
         self.file_type_label = QLabel("-")
         self.file_duration_label = QLabel("-")
         input_layout.addRow("Type:", self.file_type_label)
@@ -215,7 +286,6 @@ class MainWindow(QMainWindow):
         output_group_box = QGroupBox("Output")
         output_layout = QFormLayout()
 
-        # Output folder
         output_folder_layout = QHBoxLayout()
         self.output_folder_edit = QLineEdit()
         self.output_folder_button = QPushButton("Browse...")
@@ -224,12 +294,10 @@ class MainWindow(QMainWindow):
         output_folder_layout.addWidget(self.output_folder_button)
         output_layout.addRow("Output Folder:", output_folder_layout)
 
-        # Output filename (custom)
         self.output_filename_edit = QLineEdit()
         self.output_filename_edit.setPlaceholderText("Leave empty to use input filename")
         output_layout.addRow("Output Filename:", self.output_filename_edit)
 
-        # Help text
         help_label = QLabel("Filename without extension (e.g., 'my_transcription')")
         help_label.setStyleSheet("color: gray; font-size: 10pt;")
         output_layout.addRow("", help_label)
@@ -241,17 +309,14 @@ class MainWindow(QMainWindow):
         status_group_box = QGroupBox("Transcription Status")
         status_layout = QVBoxLayout()
 
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         status_layout.addWidget(self.progress_bar)
 
-        # Status text
         self.status_label = QLabel("Ready")
         status_layout.addWidget(self.status_label)
 
-        # ETA
         self.eta_label = QLabel("")
         status_layout.addWidget(self.eta_label)
 
@@ -291,13 +356,13 @@ class MainWindow(QMainWindow):
 
     def _load_settings_to_ui(self):
         self.output_folder_edit.setText(self.settings.output_folder or "")
-        # Do NOT load default_output_filename - always start empty per user preference
         self.output_filename_edit.setText("")
 
     def _save_settings_from_ui(self):
         self.settings.output_folder = self.output_folder_edit.text()
         self.settings_panel.save_settings()
-        self.live_panel.save_settings()
+        if self.live_panel is not None:
+            self.live_panel.save_settings()
         save_settings(self.settings)
 
     def _on_theme_changed(self, theme):
@@ -312,16 +377,13 @@ class MainWindow(QMainWindow):
         if not file:
             return
 
-        # Clear any existing job
         if self.current_job:
             if hasattr(self.current_job, 'temp_dir') and os.path.exists(self.current_job.temp_dir):
                 shutil.rmtree(self.current_job.temp_dir)
             self.current_job = None
 
-        # Clear custom filename when selecting new file
         self.output_filename_edit.setText("")
 
-        # Update UI to show loading state
         self.file_path_edit.setText(file)
         self.file_type_label.setText("Loading...")
         self.file_duration_label.setText("Loading...")
@@ -331,7 +393,6 @@ class MainWindow(QMainWindow):
         self.select_file_button.setEnabled(False)
         self.start_button.setEnabled(False)
 
-        # Start background worker to process the file
         self._file_load_worker = FileLoadWorker(file, self)
         self._file_load_worker.status_updated.connect(self._on_file_load_status)
         self._file_load_worker.file_info_ready.connect(self._on_file_info_ready)
@@ -367,7 +428,6 @@ class MainWindow(QMainWindow):
             self.output_folder_edit.setText(dir_path)
 
     def _open_output_folder(self):
-        """Open the output folder in the system file explorer"""
         output_dir = self.output_folder_edit.text()
         if not output_dir:
             QMessageBox.information(self, "Open Output Folder", "Please select an output folder first.")
@@ -382,10 +442,109 @@ class MainWindow(QMainWindow):
                 os.startfile(output_dir)
             elif sys.platform == 'darwin':
                 subprocess.run(['open', output_dir], check=True)
-            else:  # Linux and other Unix-like systems
+            else:
                 subprocess.run(['xdg-open', output_dir], check=True)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open output folder:\n{e}")
+
+    def _ensure_model_available(self) -> bool:
+        """Check if the selected model is present; offer to download English models if not.
+
+        Returns True if the model is ready to use, False if the user should abort.
+        """
+        from engine.model_loader import resolve_model_path, get_model_download_info, validate_model_path
+        from engine.whisper_cpp_runner import validate_ggml_model
+        from core.worker import determine_engine, get_base_path
+
+        engine = determine_engine(self.settings.device)
+        base_path = get_base_path()
+        model_path = resolve_model_path(self.settings.language, engine, base_path)
+
+        model_ready = (
+            validate_ggml_model(model_path) if engine == "whisper-cpp"
+            else validate_model_path(model_path)
+        )
+        if model_ready:
+            return True
+
+        download_info = get_model_download_info(self.settings.language, engine)
+        if not download_info:
+            QMessageBox.warning(
+                self, "Model Missing",
+                f"Required model not found:\n{model_path}\n\n"
+                "This is a bundled model. Please reinstall the application."
+            )
+            return False
+
+        # Check disk space before downloading (~3 GB for English CT2, ~1.5 GB for GGML)
+        required_gb = 3.5 if download_info["type"] == "ct2" else 1.8
+        try:
+            stat = shutil.disk_usage(base_path)
+            if stat.free < required_gb * 1024 ** 3:
+                reply = QMessageBox.question(
+                    self, "Low Disk Space",
+                    f"Downloading the English model requires ~{required_gb:.0f} GB of free disk space.\n"
+                    f"Available: {stat.free / 1024 ** 3:.1f} GB\n\nContinue anyway?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.No:
+                    return False
+        except Exception:
+            pass
+
+        return self._run_model_download(download_info, model_path)
+
+    def _run_model_download(self, download_info: dict, model_path: str) -> bool:
+        """Show a progress dialog and download the model. Returns True on success."""
+        repo_id = download_info["repo_id"]
+        size_note = "~3 GB" if download_info["type"] == "ct2" else "~1.5 GB"
+
+        progress_dialog = QProgressDialog(
+            f"Downloading English model ({size_note})…\n{repo_id}",
+            "Cancel",
+            0, 100,
+            self,
+        )
+        progress_dialog.setWindowTitle("Downloading Model")
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setValue(0)
+
+        self._download_worker = ModelDownloadWorker(download_info, model_path, parent=self)
+
+        success_flag = [False]
+        error_msg = [""]
+
+        def on_progress(pct):
+            progress_dialog.setValue(pct)
+
+        def on_finished(success, message):
+            success_flag[0] = success
+            error_msg[0] = message
+            progress_dialog.close()
+
+        def on_canceled():
+            self._download_worker.cancel()
+
+        self._download_worker.progress_updated.connect(on_progress)
+        self._download_worker.finished.connect(on_finished)
+        progress_dialog.canceled.connect(on_canceled)
+
+        self._download_worker.start()
+        progress_dialog.exec()
+        self._download_worker.wait(10000)
+        self._download_worker = None
+
+        if not success_flag[0]:
+            if error_msg[0] and "canceled" not in error_msg[0].lower():
+                QMessageBox.warning(
+                    self, "Download Failed",
+                    f"Failed to download model:\n{error_msg[0]}"
+                )
+            return False
+
+        return True
 
     def _start_transcription(self):
         if self.current_job is None:
@@ -396,7 +555,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Already Running", "Transcription is already in progress.")
             return
 
-        # Verify chunk files still exist (they may be gone if a previous run failed and cleaned up)
         for task in self.current_job.tasks:
             if not os.path.exists(task.chunk_path):
                 QMessageBox.warning(
@@ -415,7 +573,6 @@ class MainWindow(QMainWindow):
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Validate output directory is writable
         test_file = os.path.join(output_dir, '.ivrit_write_test')
         try:
             with open(test_file, 'w') as f:
@@ -428,14 +585,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Handle custom filename (if provided)
         custom_filename = self.output_filename_edit.text().strip()
         if custom_filename:
-            # Sanitize: keep alphanumeric, spaces, hyphens, underscores
             custom_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_'))
-            # Remove multiple consecutive spaces
             custom_filename = " ".join(custom_filename.split())
-            # Limit length
             custom_filename = custom_filename[:200]
 
             if not custom_filename:
@@ -446,17 +599,19 @@ class MainWindow(QMainWindow):
         else:
             self.current_job.custom_output_filename = None
 
-        # Validate sufficient disk space
+        # Sync settings before model check (language setting must be current)
+        self._save_settings_from_ui()
+
+        # Ensure the selected model is available (download if needed)
+        if not self._ensure_model_available():
+            return
+
         total_duration = sum(task.duration for task in self.current_job.tasks)
-        # Rough estimate: 0.5 MB per second of audio for intermediate files
         estimated_size_mb = total_duration * 0.5
 
-        import shutil as shutil_disk
         try:
-            stat = shutil_disk.disk_usage(output_dir)
+            stat = shutil.disk_usage(output_dir)
             available_mb = stat.free / (1024 * 1024)
-
-            # Require 1.5x the estimated size for safety margin
             required_mb = estimated_size_mb * 1.5
 
             if available_mb < required_mb:
@@ -473,10 +628,8 @@ class MainWindow(QMainWindow):
                 if reply == QMessageBox.No:
                     return
         except Exception as e:
-            # If we can't check disk space, just log and continue
             logging.warning(f"Could not check disk space: {e}")
 
-        # Configure logging - save in app's logs folder
         if getattr(sys, 'frozen', False):
             app_dir = os.path.dirname(sys.executable)
         else:
@@ -492,10 +645,7 @@ class MainWindow(QMainWindow):
 
         self.current_job.output_dir = output_dir
 
-        # Sync UI settings to self.settings before passing to worker
-        self._save_settings_from_ui()
-
-        # Create worker (no job_index parameter)
+        from core.worker import TranscriptionWorker
         self.active_worker = TranscriptionWorker(self.current_job, self.settings)
         self.active_worker.signals.job_status_updated.connect(self._update_job_status)
         self.active_worker.signals.task_status_updated.connect(self._update_task_status)
@@ -505,7 +655,6 @@ class MainWindow(QMainWindow):
 
         self.thread_pool.start(self.active_worker)
 
-        # Update button states
         self.start_button.setEnabled(False)
         self.pause_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
@@ -550,14 +699,12 @@ class MainWindow(QMainWindow):
         if self.current_job and task_index < len(self.current_job.tasks):
             self.current_job.tasks[task_index].status = status
             self.current_job.tasks[task_index].error_message = message if status == TaskStatus.ERROR else None
-            # Update status label with current task info
             self.status_label.setText(message)
 
     def _update_progress(self, task_index, progress):
         if self.current_job and task_index < len(self.current_job.tasks):
             self.current_job.tasks[task_index].progress = progress
             self.current_job.update_progress()
-            # Update progress bar with overall job progress
             overall_progress_percent = int(self.current_job.progress * 100)
             self.progress_bar.setValue(overall_progress_percent)
 
@@ -565,24 +712,21 @@ class MainWindow(QMainWindow):
         self.eta_label.setText(eta_string)
 
     def _worker_finished(self):
-        # Worker has finished, clear active worker
         self.active_worker = None
-        # Note: Temp directory cleanup is now handled exclusively in worker's finally block
 
     def closeEvent(self, event):
         self._save_settings_from_ui()
-        # Stop live transcription session if active
-        self.live_panel.stop_session()
-        # Wait for file load worker if running
+        if self.live_panel is not None:
+            self.live_panel.stop_session()
         if hasattr(self, '_file_load_worker') and self._file_load_worker is not None:
             self._file_load_worker.wait(5000)
-        # Cancel active worker before waiting for the thread pool to finish
         if self.active_worker:
             self.active_worker.cancel()
-        self.thread_pool.waitForDone()  # Wait for all threads to finish before exiting
+        self.thread_pool.waitForDone()
         logging.shutdown()
         QApplication.instance().quit()
         event.accept()
+
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -593,6 +737,31 @@ if __name__ == "__main__":
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+
+    # Show splash immediately for instant feedback before GPU detection
+    icon_path = _get_icon_path()
+    if os.path.exists(icon_path):
+        splash_pixmap = QPixmap(icon_path)
+    else:
+        splash_pixmap = QPixmap(300, 100)
+        splash_pixmap.fill(Qt.GlobalColor.darkGray)
+    splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
+    splash.show()
+    app.processEvents()
+
+    _window = [None]
+
+    def _on_gpu_ready(gpu_info):
+        window = MainWindow(gpu_info)
+        _window[0] = window
+        window.show()
+        splash.finish(window)
+
+    _startup = StartupWorker()
+    _startup.status_updated.connect(
+        lambda msg: splash.showMessage(msg, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+    )
+    _startup.gpu_info_ready.connect(_on_gpu_ready)
+    _startup.start()
+
     sys.exit(app.exec())

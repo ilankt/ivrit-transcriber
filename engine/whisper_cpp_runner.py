@@ -102,6 +102,7 @@ def transcribe_chunk_whispercpp(
     model_path: str,
     binary_path: str,
     beam_size: int = 1,
+    language: str = "he",
     vad_filter: bool = True,
     use_gpu: bool = True,
     progress_callback=None,
@@ -131,7 +132,7 @@ def transcribe_chunk_whispercpp(
     args = [
         binary_path,
         '--model', model_path,
-        '--language', 'he',
+        '--language', language,
         '--beam-size', str(beam_size),
         '--output-srt',
         '--output-txt',

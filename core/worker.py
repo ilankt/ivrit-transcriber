@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 from core.jobs import Job, Task, JobStatus, TaskStatus
-from engine.model_loader import load_whisper_model, validate_model_path
+from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
 from engine.transcriber import transcribe_chunk
 from engine.whisper_cpp_runner import (
     get_whispercpp_binary_path, validate_whispercpp_binary,
@@ -28,24 +28,6 @@ def get_base_path():
         return os.path.dirname(sys.executable)
     else:
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def get_model_path(model_type):
-    """Get the CTranslate2 model path for faster-whisper."""
-    base_path = get_base_path()
-    if model_type == "Fast":
-        return os.path.join(base_path, 'Models', 'ivrit-large-v3-turbo-ct2')
-    else:
-        return os.path.join(base_path, 'Models', 'ivrit-large-v3-ct2')
-
-
-def get_ggml_model_path(model_type):
-    """Get the GGML model path for whisper.cpp."""
-    base_path = get_base_path()
-    if model_type == "Fast":
-        return os.path.join(base_path, 'Models', 'ggml-ivrit-large-v3-turbo.bin')
-    else:
-        return os.path.join(base_path, 'Models', 'ggml-ivrit-large-v3.bin')
 
 
 def determine_engine(device: str) -> str:
@@ -126,16 +108,17 @@ class TranscriptionWorker(QRunnable):
         cleanup_temp = False
 
         engine = determine_engine(self.settings.device)
+        language = self.settings.language
 
         try:
-            beam_size = 1 if self.settings.model_type == "Fast" else 3
+            beam_size = 3
 
             logging.info(f"Starting transcription for {self.job.original_file_path}")
-            logging.info(f"Engine: {engine}, Model type: {self.settings.model_type}, Device: {self.settings.device}")
+            logging.info(f"Engine: {engine}, Language: {language}, Device: {self.settings.device}")
 
             # Engine-specific setup
             if engine == "whisper-cpp":
-                ggml_path = get_ggml_model_path(self.settings.model_type)
+                ggml_path = resolve_model_path(language, "whisper-cpp", get_base_path())
                 binary_path = get_whispercpp_binary_path(get_base_path())
 
                 if not binary_path or not validate_whispercpp_binary(binary_path):
@@ -155,7 +138,7 @@ class TranscriptionWorker(QRunnable):
                 logging.info(f"whisper.cpp binary: {binary_path}")
                 logging.info(f"GGML model: {ggml_path}")
             else:
-                model_path = get_model_path(self.settings.model_type)
+                model_path = resolve_model_path(language, "faster-whisper", get_base_path())
                 logging.info(f"Model path: {model_path}")
 
                 if not validate_model_path(model_path):
@@ -220,6 +203,7 @@ class TranscriptionWorker(QRunnable):
                                 model_path=ggml_path,
                                 binary_path=binary_path,
                                 beam_size=beam_size,
+                                language=language,
                                 vad_filter=self.settings.vad_enabled,
                                 use_gpu=True,
                                 progress_callback=progress_cb,
@@ -228,7 +212,7 @@ class TranscriptionWorker(QRunnable):
                         else:
                             text, srt_segments = self._run_cancellable(
                                 transcribe_chunk,
-                                task.chunk_path, model, "he", beam_size, self.settings.vad_enabled,
+                                task.chunk_path, model, language, beam_size, self.settings.vad_enabled,
                                 cancel_event=self._cancel_event,
                             )
                         chunk_success = True
