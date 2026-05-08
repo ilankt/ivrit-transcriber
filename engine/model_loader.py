@@ -44,6 +44,11 @@ def resolve_model_path(
     return os.path.join(base_path, *entry["path"])
 
 
+def get_all_known_model_names() -> set[str]:
+    """Return the set of model directory/file names that are registered for any language/engine."""
+    return {entry["path"][-1] for entry in _MODEL_REGISTRY.values()}
+
+
 def get_model_download_info(language: str, engine: str) -> dict | None:
     """Return download metadata dict, or None if the model is bundled."""
     key = (language, engine)

@@ -4,10 +4,12 @@ Settings Panel UI.
 Provides shared application settings: theme, language, VAD, device, output format,
 model status with manual download, and custom models folder.
 """
+import os
+import shutil
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout,
     QComboBox, QCheckBox, QLabel, QPushButton, QLineEdit,
-    QHBoxLayout, QFileDialog,
+    QHBoxLayout, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal
 
@@ -139,6 +141,13 @@ class SettingsPanel(QWidget):
         folder_row.addWidget(models_folder_browse)
         models_layout.addRow("Models Folder:", folder_row)
 
+        self.cleanup_button = QPushButton("Clean Up Unused Models…")
+        self.cleanup_button.setToolTip(
+            "Scan the models folder and permanently delete files not used by this application."
+        )
+        self.cleanup_button.clicked.connect(self._cleanup_unused_models)
+        models_layout.addRow("", self.cleanup_button)
+
         models_group.setLayout(models_layout)
         layout.addWidget(models_group)
 
@@ -235,4 +244,83 @@ class SettingsPanel(QWidget):
     def _on_language_changed(self):
         lang = self.language_combo.currentData()
         self.english_info_label.setVisible(lang == "en")
+        self._refresh_model_status()
+
+    def _cleanup_unused_models(self):
+        """Scan the models folder and offer to delete anything not in the registry."""
+        from engine.model_loader import get_all_known_model_names
+        from core.worker import get_base_path
+
+        custom_dir = self.models_folder_edit.text().strip()
+        base_models_dir = custom_dir if custom_dir else os.path.join(get_base_path(), "Models")
+
+        if not os.path.isdir(base_models_dir):
+            QMessageBox.information(self, "Clean Up", "Models folder not found or empty.")
+            return
+
+        known = get_all_known_model_names()
+
+        to_delete = []
+        for entry in os.scandir(base_models_dir):
+            if entry.name not in known:
+                to_delete.append(entry.path)
+
+        if not to_delete:
+            QMessageBox.information(self, "Clean Up", "No unused models found.")
+            return
+
+        # Calculate total size
+        total_bytes = 0
+        for path in to_delete:
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    for f in files:
+                        try:
+                            total_bytes += os.path.getsize(os.path.join(root, f))
+                        except OSError:
+                            pass
+            else:
+                try:
+                    total_bytes += os.path.getsize(path)
+                except OSError:
+                    pass
+
+        size_str = (
+            f"{total_bytes / 1024**3:.2f} GB" if total_bytes >= 1024**3
+            else f"{total_bytes / 1024**2:.0f} MB"
+        )
+
+        names = "\n".join(f"  • {os.path.basename(p)}" for p in sorted(to_delete))
+        reply = QMessageBox.question(
+            self, "Clean Up Unused Models",
+            f"The following items in the models folder are not used\n"
+            f"by this application and can be permanently deleted ({size_str}):\n\n"
+            f"{names}\n\n"
+            "This cannot be undone. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        errors = []
+        deleted = 0
+        for path in to_delete:
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(path)}: {e}")
+
+        if errors:
+            QMessageBox.warning(
+                self, "Clean Up",
+                f"Deleted {deleted} item(s). Could not delete:\n" + "\n".join(errors)
+            )
+        else:
+            QMessageBox.information(self, "Clean Up", f"Deleted {deleted} unused model(s).")
+
         self._refresh_model_status()
