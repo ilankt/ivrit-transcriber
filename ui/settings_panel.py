@@ -6,6 +6,7 @@ model status with manual download, and custom models folder.
 """
 import os
 import shutil
+import stat
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout,
     QComboBox, QCheckBox, QLabel, QPushButton, QLineEdit,
@@ -305,13 +306,22 @@ class SettingsPanel(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        def _on_rmtree_error(func, path, exc_info):
+            # HuggingFace Hub marks cached files read-only; clear the flag and retry.
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
         errors = []
         deleted = 0
         for path in to_delete:
             try:
                 if os.path.isdir(path):
-                    shutil.rmtree(path)
+                    shutil.rmtree(path, onerror=_on_rmtree_error)
                 else:
+                    os.chmod(path, stat.S_IWRITE)
                     os.remove(path)
                 deleted += 1
             except Exception as e:
