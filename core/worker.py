@@ -117,8 +117,9 @@ class TranscriptionWorker(QRunnable):
             logging.info(f"Engine: {engine}, Language: {language}, Device: {self.settings.device}")
 
             # Engine-specific setup
+            models_dir = getattr(self.settings, 'models_folder', None) or None
             if engine == "whisper-cpp":
-                ggml_path = resolve_model_path(language, "whisper-cpp", get_base_path())
+                ggml_path = resolve_model_path(language, "whisper-cpp", get_base_path(), models_dir)
                 binary_path = get_whispercpp_binary_path(get_base_path())
 
                 if not binary_path or not validate_whispercpp_binary(binary_path):
@@ -138,7 +139,7 @@ class TranscriptionWorker(QRunnable):
                 logging.info(f"whisper.cpp binary: {binary_path}")
                 logging.info(f"GGML model: {ggml_path}")
             else:
-                model_path = resolve_model_path(language, "faster-whisper", get_base_path())
+                model_path = resolve_model_path(language, "faster-whisper", get_base_path(), models_dir)
                 logging.info(f"Model path: {model_path}")
 
                 if not validate_model_path(model_path):

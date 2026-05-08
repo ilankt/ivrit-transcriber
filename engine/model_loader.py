@@ -24,10 +24,23 @@ _MODEL_REGISTRY = {
 }
 
 
-def resolve_model_path(language: str, engine: str, base_path: str) -> str:
-    """Return the absolute local path for the given language/engine combination."""
+def resolve_model_path(
+    language: str,
+    engine: str,
+    base_path: str,
+    models_dir: str | None = None,
+) -> str:
+    """Return the absolute local path for the given language/engine combination.
+
+    If *models_dir* is provided it is used as the models directory directly.
+    Otherwise the default ``<base_path>/Models`` tree is used.
+    """
     key = (language, engine)
     entry = _MODEL_REGISTRY.get(key) or _MODEL_REGISTRY[("he", "faster-whisper")]
+    # entry["path"] is e.g. ("Models", "ivrit-large-v3-ct2").
+    # When a custom models_dir is supplied, skip the "Models" prefix.
+    if models_dir:
+        return os.path.join(models_dir, *entry["path"][1:])
     return os.path.join(base_path, *entry["path"])
 
 

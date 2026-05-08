@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
         # Tab 2: Settings
         self.settings_panel = SettingsPanel(self.settings, self.gpu_info)
         self.settings_panel.theme_changed.connect(self._on_theme_changed)
+        self.settings_panel.download_requested.connect(self._on_download_requested)
         self.tab_widget.addTab(self.settings_panel, "Settings")
 
         self.setCentralWidget(main_widget)
@@ -458,7 +459,8 @@ class MainWindow(QMainWindow):
 
         engine = determine_engine(self.settings.device)
         base_path = get_base_path()
-        model_path = resolve_model_path(self.settings.language, engine, base_path)
+        models_dir = self.settings.models_folder or None
+        model_path = resolve_model_path(self.settings.language, engine, base_path, models_dir)
 
         model_ready = (
             validate_ggml_model(model_path) if engine == "whisper-cpp"
@@ -478,8 +480,9 @@ class MainWindow(QMainWindow):
 
         # Check disk space before downloading (~3 GB for English CT2, ~1.5 GB for GGML)
         required_gb = 3.5 if download_info["type"] == "ct2" else 1.8
+        space_check_dir = (models_dir if models_dir and os.path.exists(models_dir) else base_path)
         try:
-            stat = shutil.disk_usage(base_path)
+            stat = shutil.disk_usage(space_check_dir)
             if stat.free < required_gb * 1024 ** 3:
                 reply = QMessageBox.question(
                     self, "Low Disk Space",
@@ -545,6 +548,30 @@ class MainWindow(QMainWindow):
             return False
 
         return True
+
+    def _on_download_requested(self):
+        """Handle the Download button in the Settings panel."""
+        self._save_settings_from_ui()
+
+        from engine.model_loader import resolve_model_path, get_model_download_info
+        from core.worker import get_base_path
+
+        device = self.settings.device
+        engine = "whisper-cpp" if device == "amd" else "faster-whisper"
+        base_path = get_base_path()
+        models_dir = self.settings.models_folder or None
+        model_path = resolve_model_path(self.settings.language, engine, base_path, models_dir)
+        download_info = get_model_download_info(self.settings.language, engine)
+
+        if not download_info:
+            QMessageBox.information(
+                self, "No Download Available",
+                "This model is bundled with the application and cannot be downloaded separately."
+            )
+            return
+
+        self._run_model_download(download_info, model_path)
+        self.settings_panel._refresh_model_status()
 
     def _start_transcription(self):
         if self.current_job is None:

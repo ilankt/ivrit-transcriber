@@ -9,6 +9,7 @@ class Settings(BaseModel):
     threads: int = 0
     compute_type: str = "auto"
     output_folder: Optional[str] = None
+    models_folder: Optional[str] = None  # Custom models directory; None = default (app dir/Models)
     device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
     output_format: str = "srt"  # "srt", "txt", or "both"
     default_output_filename: Optional[str] = None

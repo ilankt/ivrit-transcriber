@@ -79,7 +79,8 @@ class LiveTranscriptionWorker(QThread):
             # Load model while audio accumulates in the buffer
             self.status_updated.emit("Loading model (recording audio)...")
 
-            model_path = resolve_model_path(self.settings.language, "faster-whisper", get_base_path())
+            models_dir = getattr(self.settings, 'models_folder', None) or None
+            model_path = resolve_model_path(self.settings.language, "faster-whisper", get_base_path(), models_dir)
             if not validate_model_path(model_path):
                 self.error_occurred.emit(
                     f"Invalid model path: {model_path}. Required model files are missing."
