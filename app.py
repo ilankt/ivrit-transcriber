@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
         if index == 1 and self.live_panel is None:
             from ui.live_panel import LiveTranscriptionPanel
             self.live_panel = LiveTranscriptionPanel(self.settings)
+            self.live_panel.model_download_needed.connect(self._on_live_model_download_needed)
             layout = QVBoxLayout(self._live_placeholder)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(self.live_panel)
@@ -548,6 +549,22 @@ class MainWindow(QMainWindow):
             return False
 
         return True
+
+    def _on_live_model_download_needed(self):
+        """Download the missing live-transcription model then retry starting the session."""
+        self._save_settings_from_ui()
+
+        from engine.model_loader import resolve_model_path, get_model_download_info
+        from core.worker import get_base_path
+
+        models_dir = self.settings.models_folder or None
+        model_path = resolve_model_path(
+            self.settings.language, "faster-whisper", get_base_path(), models_dir
+        )
+        download_info = get_model_download_info(self.settings.language, "faster-whisper")
+        if download_info and self._run_model_download(download_info, model_path):
+            self.settings_panel._refresh_model_status()
+            self.live_panel._start_session()
 
     def _on_download_requested(self):
         """Handle the Download button in the Settings panel."""

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QProgressBar, QLabel, QTextEdit,
     QLineEdit, QFileDialog, QMessageBox,
 )
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QTextCursor
 
 from engine.audio_capture import list_loopback_devices
@@ -20,6 +20,8 @@ from core.live_worker import LiveTranscriptionWorker, save_live_session, BUFFER_
 
 class LiveTranscriptionPanel(QWidget):
     """Panel for live audio transcription from system audio loopback."""
+
+    model_download_needed = Signal()  # model missing; MainWindow should download then call _start_session
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -186,6 +188,35 @@ class LiveTranscriptionPanel(QWidget):
             return
 
         os.makedirs(output_folder, exist_ok=True)
+
+        # Check that the model is present before starting (live always uses faster-whisper)
+        from engine.model_loader import resolve_model_path, validate_model_path, get_model_download_info
+        from core.worker import get_base_path
+        models_dir = getattr(self.settings, 'models_folder', None) or None
+        model_path = resolve_model_path(
+            self.settings.language, "faster-whisper", get_base_path(), models_dir
+        )
+        if not validate_model_path(model_path):
+            download_info = get_model_download_info(self.settings.language, "faster-whisper")
+            if download_info:
+                lang = "English" if self.settings.language == "en" else "Hebrew"
+                size = "~3 GB" if download_info["type"] == "ct2" else "~1.5 GB"
+                reply = QMessageBox.question(
+                    self, "Model Not Downloaded",
+                    f"The {lang} model ({size}) has not been downloaded yet.\n\n"
+                    "Download it now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    self.model_download_needed.emit()
+            else:
+                QMessageBox.warning(
+                    self, "Model Missing",
+                    f"Model not found at:\n{model_path}\n\n"
+                    "Check the Models folder in Settings."
+                )
+            return
 
         dev = self._devices[idx]
 
