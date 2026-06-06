@@ -1,21 +1,19 @@
 import json
 import os
 from pydantic import BaseModel
-from typing import Optional
 
 class Settings(BaseModel):
     language: str = "he"  # "he" (Hebrew) or "en" (English)
     vad_enabled: bool = True
     threads: int = 0
     compute_type: str = "auto"
-    output_folder: Optional[str] = None
-    models_folder: Optional[str] = None  # Custom models directory; None = default (app dir/Models)
+    output_folder: str | None = None
+    models_folder: str | None = None  # Custom models directory; None = default (app dir/Models)
     device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
     output_format: str = "srt"  # "srt", "txt", or "both"
-    default_output_filename: Optional[str] = None
     theme: str = "system"  # "system", "light", or "dark"
-    live_audio_device: Optional[str] = None
-    live_output_folder: Optional[str] = None
+    live_audio_device: str | None = None
+    live_output_folder: str | None = None
 
 def get_settings_path() -> str:
     if os.name == 'nt':

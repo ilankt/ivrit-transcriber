@@ -1,55 +1,18 @@
 import os
-import sys
-import tempfile
 import shutil
 import time
 import logging
 import threading
-from datetime import datetime
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
-from core.jobs import Job, Task, JobStatus, TaskStatus
+from core.jobs import Job, JobStatus, TaskStatus
+from core.runtime import determine_engine, get_base_path
 from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
 from engine.transcriber import transcribe_chunk
 from engine.whisper_cpp_runner import (
     get_whispercpp_binary_path, validate_whispercpp_binary,
     validate_ggml_model, transcribe_chunk_whispercpp,
 )
-from engine.merger import merge_srt_files, merge_txt_files
 from engine.checkpoint import save_chunk_checkpoint, merge_checkpoints_to_files, cleanup_checkpoints
-
-
-def get_base_path():
-    """
-    Get the base path for the application.
-    When running as a PyInstaller executable, use the directory containing the exe.
-    Otherwise, use the directory containing the main script.
-    """
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def determine_engine(device: str) -> str:
-    """
-    Determine which transcription engine to use based on device setting.
-
-    Returns: "faster-whisper" or "whisper-cpp"
-    """
-    if device == "amd":
-        return "whisper-cpp"
-    elif device == "auto":
-        # Check if AMD GPU is available and no NVIDIA GPU
-        from engine.gpu_detector import detect_cuda_gpu, detect_vulkan_gpu
-        cuda_ok, _ = detect_cuda_gpu()
-        if cuda_ok:
-            return "faster-whisper"
-        amd_ok, _ = detect_vulkan_gpu()
-        if amd_ok:
-            return "whisper-cpp"
-        return "faster-whisper"  # CPU fallback
-    else:
-        return "faster-whisper"  # "cpu" or "nvidia"
 
 
 class WorkerSignals(QObject):
@@ -58,6 +21,7 @@ class WorkerSignals(QObject):
     job_status_updated = Signal(JobStatus, str)  # status, message
     eta_updated = Signal(str)  # eta_string
     finished = Signal()
+
 
 class TranscriptionWorker(QRunnable):
     def __init__(self, job: Job, settings):
@@ -73,7 +37,7 @@ class TranscriptionWorker(QRunnable):
         self.total_audio_duration = 0.0
 
     def _get_base_name(self):
-        if hasattr(self.job, 'custom_output_filename') and self.job.custom_output_filename:
+        if self.job.custom_output_filename:
             return self.job.custom_output_filename
         return os.path.splitext(os.path.basename(self.job.original_file_path))[0]
 
@@ -109,6 +73,7 @@ class TranscriptionWorker(QRunnable):
 
         engine = determine_engine(self.settings.device)
         language = self.settings.language
+        base_path = get_base_path()
 
         try:
             beam_size = 3
@@ -119,8 +84,8 @@ class TranscriptionWorker(QRunnable):
             # Engine-specific setup
             models_dir = getattr(self.settings, 'models_folder', None) or None
             if engine == "whisper-cpp":
-                ggml_path = resolve_model_path(language, "whisper-cpp", get_base_path(), models_dir)
-                binary_path = get_whispercpp_binary_path(get_base_path())
+                ggml_path = resolve_model_path(language, "whisper-cpp", base_path, models_dir)
+                binary_path = get_whispercpp_binary_path(base_path)
 
                 if not binary_path or not validate_whispercpp_binary(binary_path):
                     self.signals.job_status_updated.emit(
@@ -139,7 +104,7 @@ class TranscriptionWorker(QRunnable):
                 logging.info(f"whisper.cpp binary: {binary_path}")
                 logging.info(f"GGML model: {ggml_path}")
             else:
-                model_path = resolve_model_path(language, "faster-whisper", get_base_path(), models_dir)
+                model_path = resolve_model_path(language, "faster-whisper", base_path, models_dir)
                 logging.info(f"Model path: {model_path}")
 
                 if not validate_model_path(model_path):
@@ -315,7 +280,7 @@ class TranscriptionWorker(QRunnable):
             logging.error(f"Error during transcription for {self.job.original_file_path}: {e}")
         finally:
             # Only clean up temp files on success — keep them on error so user can retry
-            if cleanup_temp and hasattr(self.job, 'temp_dir') and os.path.exists(self.job.temp_dir):
+            if cleanup_temp and self.job.temp_dir and os.path.exists(self.job.temp_dir):
                 shutil.rmtree(self.job.temp_dir)
             self.signals.finished.emit()
 
@@ -325,7 +290,7 @@ class TranscriptionWorker(QRunnable):
         self._cleanup_checkpoint_files(base_name)
         if txt_path or srt_path:
             self.signals.job_status_updated.emit(JobStatus.CANCELED, "Job canceled. Partial results saved.")
-            logging.info(f"Transcription canceled. Partial results saved.")
+            logging.info("Transcription canceled. Partial results saved.")
         else:
             self.signals.job_status_updated.emit(JobStatus.CANCELED, "Job canceled")
             logging.info(f"Transcription canceled for {self.job.original_file_path}")

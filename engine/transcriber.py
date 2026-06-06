@@ -1,9 +1,8 @@
 from faster_whisper import WhisperModel
-import os
 import json
 
 def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_size: int, vad_filter: bool, cancel_event=None):
-    segments, info = model.transcribe(
+    segments, _info = model.transcribe(
         audio_path,
         language=language,
         beam_size=beam_size,

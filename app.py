@@ -7,14 +7,16 @@ import subprocess
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QGroupBox, QPushButton, QProgressBar,
-                               QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
-                               QCheckBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
-                               QTabWidget, QProgressDialog, QSplashScreen)
-from PySide6.QtGui import QAction, QIcon, QPixmap
-from PySide6.QtCore import QThread, QThreadPool, QTimer, Qt, Signal
-from core.settings import load_settings, save_settings, Settings
+                               QHBoxLayout, QFormLayout, QLineEdit,
+                               QFileDialog, QMessageBox, QLabel,
+                               QTabWidget, QProgressDialog)
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QThread, QThreadPool, Qt, Signal
+from core.settings import load_settings, save_settings
 from engine.ffmpeg_helper import probe_media, extract_audio, split_audio
 from core.jobs import Job, Task, JobStatus, TaskStatus
+from core.filenames import sanitize_output_stem
+from core.runtime import determine_engine, get_base_path
 from ui.settings_panel import SettingsPanel
 
 
@@ -47,15 +49,21 @@ def _get_icon_path() -> str:
 
 
 class StartupWorker(QThread):
-    """Detects GPUs in a background thread so the splash shows immediately."""
-    status_updated = Signal(str)
+    """Detect GPUs without blocking the main window."""
     gpu_info_ready = Signal(object)  # dict from detect_all_gpus()
 
     def run(self):
         from engine.gpu_detector import detect_all_gpus
-        self.status_updated.emit("Detecting GPUs…")
         gpu_info = detect_all_gpus()
         self.gpu_info_ready.emit(gpu_info)
+
+
+def _detecting_gpu_info() -> dict:
+    return {
+        "detecting": True,
+        "nvidia_cuda": {"available": False, "info": "Detecting"},
+        "amd_vulkan": {"available": False, "info": "Detecting"},
+    }
 
 
 class FileLoadWorker(QThread):
@@ -106,7 +114,7 @@ class FileLoadWorker(QThread):
                 chunk_duration, _ = probe_media(chunk_path)
                 if chunk_duration is None:
                     chunk_duration = 60
-                task = Task(self.file_path, chunk_path, i)
+                task = Task(chunk_path, i)
                 task.duration = chunk_duration
                 tasks.append(task)
 
@@ -192,6 +200,7 @@ class MainWindow(QMainWindow):
 
         self.settings = load_settings()
         self.gpu_info = gpu_info
+        self.startup_worker = None
         self.current_job = None
         self.active_worker = None
         self.live_panel = None  # built lazily on first tab access
@@ -235,6 +244,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
         self._load_settings_to_ui()
+
+    def update_gpu_info(self, gpu_info: dict):
+        """Apply background GPU detection results after the window is already visible."""
+        self.gpu_info = gpu_info
+        self.settings_panel.update_gpu_info(gpu_info)
 
     def _on_tab_changed(self, index: int):
         """Lazily build the Live Transcription panel on first visit."""
@@ -380,7 +394,7 @@ class MainWindow(QMainWindow):
             return
 
         if self.current_job:
-            if hasattr(self.current_job, 'temp_dir') and os.path.exists(self.current_job.temp_dir):
+            if self.current_job.temp_dir and os.path.exists(self.current_job.temp_dir):
                 shutil.rmtree(self.current_job.temp_dir)
             self.current_job = None
 
@@ -454,20 +468,19 @@ class MainWindow(QMainWindow):
 
         Returns True if the model is ready to use, False if the user should abort.
         """
-        from engine.model_loader import resolve_model_path, get_model_download_info, validate_model_path
-        from engine.whisper_cpp_runner import validate_ggml_model
-        from core.worker import determine_engine, get_base_path
+        from engine.model_loader import (
+            get_download_required_gb,
+            get_model_download_info,
+            is_model_available,
+            resolve_model_path,
+        )
 
         engine = determine_engine(self.settings.device)
         base_path = get_base_path()
         models_dir = self.settings.models_folder or None
         model_path = resolve_model_path(self.settings.language, engine, base_path, models_dir)
 
-        model_ready = (
-            validate_ggml_model(model_path) if engine == "whisper-cpp"
-            else validate_model_path(model_path)
-        )
-        if model_ready:
+        if is_model_available(model_path, engine):
             return True
 
         download_info = get_model_download_info(self.settings.language, engine)
@@ -480,7 +493,7 @@ class MainWindow(QMainWindow):
             return False
 
         # Check disk space before downloading (~3 GB for English CT2, ~1.5 GB for GGML)
-        required_gb = 3.5 if download_info["type"] == "ct2" else 1.8
+        required_gb = get_download_required_gb(download_info)
         space_check_dir = (models_dir if models_dir and os.path.exists(models_dir) else base_path)
         try:
             stat = shutil.disk_usage(space_check_dir)
@@ -501,11 +514,13 @@ class MainWindow(QMainWindow):
 
     def _run_model_download(self, download_info: dict, model_path: str) -> bool:
         """Show a progress dialog and download the model. Returns True on success."""
+        from engine.model_loader import get_download_size_label
+
         repo_id = download_info["repo_id"]
-        size_note = "~3 GB" if download_info["type"] == "ct2" else "~1.5 GB"
+        size_note = get_download_size_label(download_info)
 
         progress_dialog = QProgressDialog(
-            f"Downloading English model ({size_note})…\n{repo_id}",
+            f"Downloading model ({size_note})…\n{repo_id}",
             "Cancel",
             0, 100,
             self,
@@ -555,7 +570,6 @@ class MainWindow(QMainWindow):
         self._save_settings_from_ui()
 
         from engine.model_loader import resolve_model_path, get_model_download_info
-        from core.worker import get_base_path
 
         models_dir = self.settings.models_folder or None
         model_path = resolve_model_path(
@@ -571,7 +585,6 @@ class MainWindow(QMainWindow):
         self._save_settings_from_ui()
 
         from engine.model_loader import resolve_model_path, get_model_download_info
-        from core.worker import get_base_path
 
         device = self.settings.device
         engine = "whisper-cpp" if device == "amd" else "faster-whisper"
@@ -631,9 +644,7 @@ class MainWindow(QMainWindow):
 
         custom_filename = self.output_filename_edit.text().strip()
         if custom_filename:
-            custom_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_'))
-            custom_filename = " ".join(custom_filename.split())
-            custom_filename = custom_filename[:200]
+            custom_filename = sanitize_output_stem(custom_filename)
 
             if not custom_filename:
                 QMessageBox.warning(self, "Invalid Filename", "Please enter a valid filename.")
@@ -766,6 +777,8 @@ class MainWindow(QMainWindow):
             self._file_load_worker.wait(5000)
         if self.active_worker:
             self.active_worker.cancel()
+        if self.startup_worker and self.startup_worker.isRunning():
+            self.startup_worker.wait(5000)
         self.thread_pool.waitForDone()
         logging.shutdown()
         QApplication.instance().quit()
@@ -782,30 +795,13 @@ if __name__ == "__main__":
     if app is None:
         app = QApplication(sys.argv)
 
-    # Show splash immediately for instant feedback before GPU detection
-    icon_path = _get_icon_path()
-    if os.path.exists(icon_path):
-        splash_pixmap = QPixmap(icon_path)
-    else:
-        splash_pixmap = QPixmap(300, 100)
-        splash_pixmap.fill(Qt.GlobalColor.darkGray)
-    splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
-    splash.show()
-    app.processEvents()
+    window = MainWindow(_detecting_gpu_info())
+    window.show()
 
-    _window = [None]
-
-    def _on_gpu_ready(gpu_info):
-        window = MainWindow(gpu_info)
-        _window[0] = window
-        window.show()
-        splash.finish(window)
-
-    _startup = StartupWorker()
-    _startup.status_updated.connect(
-        lambda msg: splash.showMessage(msg, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
-    )
-    _startup.gpu_info_ready.connect(_on_gpu_ready)
-    _startup.start()
+    startup_worker = StartupWorker(window)
+    window.startup_worker = startup_worker
+    startup_worker.gpu_info_ready.connect(window.update_gpu_info)
+    startup_worker.finished.connect(lambda: setattr(window, "startup_worker", None))
+    startup_worker.start()
 
     sys.exit(app.exec())

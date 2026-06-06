@@ -135,19 +135,20 @@ The executable will be in `dist/IvritTranscriber/`.
 ```
 app.py                      # Main application and GUI
 core/
+  filenames.py              # Shared output filename sanitizing
   settings.py               # Settings persistence (Pydantic)
-  jobs.py                   # Job/Task state management
+  jobs.py                   # Job/Task state dataclasses
+  runtime.py                # Runtime path and engine selection helpers
   worker.py                 # Transcription worker (QRunnable)
   live_worker.py            # Live transcription worker (QThread)
 engine/
   audio_capture.py           # WASAPI loopback device enumeration and buffering
+  checkpoint.py              # Progressive save and final SRT/TXT merge support
   ffmpeg_helper.py           # FFmpeg wrapper (probe, extract, split)
-  model_loader.py            # CTranslate2 model validation and loading
+  model_loader.py            # Model registry, validation, downloads, and loading
   gpu_detector.py            # NVIDIA CUDA and AMD Vulkan detection
   transcriber.py             # Chunk transcription (faster-whisper)
   whisper_cpp_runner.py      # Chunk transcription (whisper.cpp subprocess)
-  merger.py                  # Merge chunks into final SRT/TXT
-  checkpoint.py              # Checkpoint support
 ui/
   live_panel.py              # Live transcription UI panel
   settings_panel.py          # Settings UI panel (theme, model, device)

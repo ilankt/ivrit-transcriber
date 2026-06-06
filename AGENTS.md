@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Ivrit Transcriber is a Python 3.11+ desktop app built with PySide6. The GUI entry point is `app.py`, which coordinates file selection, job creation, settings, and worker startup. Core state and orchestration live in `core/`: `settings.py` persists user preferences, `jobs.py` defines job/task state, `worker.py` handles file transcription, and `live_worker.py` handles live transcription. Transcription and media operations live in `engine/`, including FFmpeg helpers, GPU detection, model loading/downloading, Faster-Whisper, whisper.cpp, merging, and checkpoints. UI panels are in `ui/`. Runtime assets are local-only: `Models/` for Whisper models, `Binaries/` for whisper.cpp binaries, `logs/` for logs, and PyInstaller output in `build/` and `dist/`.
+Ivrit Transcriber is a Python 3.11+ desktop app built with PySide6. The GUI entry point is `app.py`, which coordinates file selection, job creation, settings, and worker startup. Core state and orchestration live in `core/`: `settings.py` persists user preferences, `jobs.py` defines job/task state, `runtime.py` holds shared runtime helpers, `worker.py` handles file transcription, and `live_worker.py` handles live transcription. Transcription and media operations live in `engine/`, including FFmpeg helpers, GPU detection, model loading/downloading, Faster-Whisper, whisper.cpp, and checkpoint-based output merging. UI panels are in `ui/`. Runtime assets are local-only: `Models/` for Whisper models, `Binaries/` for whisper.cpp binaries, `logs/` for logs, and PyInstaller output in `build/` and `dist/`.
 
 ## Build, Test, and Development Commands
 

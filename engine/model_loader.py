@@ -1,6 +1,8 @@
 import os
 from faster_whisper import WhisperModel
 
+_CT2_REQUIRED_FILES = ("model.bin", "tokenizer.json", "vocabulary.json")
+
 _MODEL_REGISTRY = {
     ("he", "faster-whisper"): {
         "path": ("Models", "ivrit-large-v3-ct2"),
@@ -14,12 +16,16 @@ _MODEL_REGISTRY = {
         "path": ("Models", "en-large-v3-ct2"),
         "repo_id": "Systran/faster-whisper-large-v3",
         "type": "ct2",
+        "size_label": "~3 GB",
+        "required_gb": 3.5,
     },
     ("en", "whisper-cpp"): {
         "path": ("Models", "ggml-large-v3.bin"),
         "repo_id": "ggerganov/whisper.cpp",
         "filename": "ggml-large-v3.bin",
         "type": "ggml",
+        "size_label": "~1.5 GB",
+        "required_gb": 1.8,
     },
 }
 
@@ -58,12 +64,24 @@ def get_model_download_info(language: str, engine: str) -> dict | None:
     return None
 
 
+def get_download_size_label(download_info: dict) -> str:
+    return download_info.get("size_label", "unknown size")
+
+
+def get_download_required_gb(download_info: dict) -> float:
+    return float(download_info.get("required_gb", 0.0))
+
+
+def is_model_available(model_path: str, engine: str) -> bool:
+    if engine == "whisper-cpp":
+        from engine.whisper_cpp_runner import validate_ggml_model
+
+        return validate_ggml_model(model_path)
+    return validate_model_path(model_path)
+
+
 def validate_model_path(path: str) -> bool:
-    required_files = ["model.bin", "tokenizer.json", "vocabulary.json"]
-    for file in required_files:
-        if not os.path.exists(os.path.join(path, file)):
-            return False
-    return True
+    return all(os.path.exists(os.path.join(path, file)) for file in _CT2_REQUIRED_FILES)
 
 
 def load_whisper_model(model_path: str, device: str, compute_type: str, threads: int):

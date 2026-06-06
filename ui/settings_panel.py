@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal
+from core.runtime import get_base_path
 
 
 class SettingsPanel(QWidget):
@@ -70,26 +71,7 @@ class SettingsPanel(QWidget):
         transcription_layout.addRow(self.vad_checkbox)
 
         self.device_combo = QComboBox()
-        self.device_combo.addItem("Auto (Try GPU, fallback to CPU)", "auto")
-        self.device_combo.addItem("CPU Only", "cpu")
-
-        nvidia_available = self.gpu_info["nvidia_cuda"]["available"]
-        amd_available = self.gpu_info["amd_vulkan"]["available"]
-
-        if nvidia_available:
-            self.device_combo.addItem(
-                f"NVIDIA GPU ({self.gpu_info['nvidia_cuda']['info']})", "nvidia"
-            )
-        if amd_available:
-            self.device_combo.addItem(
-                f"AMD GPU ({self.gpu_info['amd_vulkan']['info']})", "amd"
-            )
-
-        if self.settings.device == "nvidia" and not nvidia_available:
-            self.settings.device = "auto"
-        if self.settings.device == "amd" and not amd_available:
-            self.settings.device = "auto"
-
+        self._populate_device_combo()
         self.device_combo.currentIndexChanged.connect(self._refresh_model_status)
         transcription_layout.addRow("Device:", self.device_combo)
 
@@ -154,33 +136,64 @@ class SettingsPanel(QWidget):
 
         layout.addStretch()
 
+    def update_gpu_info(self, gpu_info: dict):
+        """Refresh device choices after background GPU detection completes."""
+        self.gpu_info = gpu_info
+        self._populate_device_combo()
+        self._refresh_model_status()
+
+    def _populate_device_combo(self):
+        selected_device = self.device_combo.currentData() or self.settings.device
+        detecting = bool(self.gpu_info.get("detecting"))
+        nvidia_info = self.gpu_info.get("nvidia_cuda", {})
+        amd_info = self.gpu_info.get("amd_vulkan", {})
+        nvidia_available = bool(nvidia_info.get("available"))
+        amd_available = bool(amd_info.get("available"))
+
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        auto_label = "Auto (Detecting GPUs...)" if detecting else "Auto (Try GPU, fallback to CPU)"
+        self.device_combo.addItem(auto_label, "auto")
+        self.device_combo.addItem("CPU Only", "cpu")
+
+        if nvidia_available or (detecting and selected_device == "nvidia"):
+            info = nvidia_info.get("info", "Detecting") if detecting else nvidia_info.get("info", "NVIDIA")
+            self.device_combo.addItem(f"NVIDIA GPU ({info})", "nvidia")
+
+        if amd_available or (detecting and selected_device == "amd"):
+            info = amd_info.get("info", "Detecting") if detecting else amd_info.get("info", "AMD")
+            self.device_combo.addItem(f"AMD GPU ({info})", "amd")
+
+        if not detecting:
+            if selected_device == "nvidia" and not nvidia_available:
+                selected_device = "auto"
+                self.settings.device = "auto"
+            if selected_device == "amd" and not amd_available:
+                selected_device = "auto"
+                self.settings.device = "auto"
+
+        self._set_combo_value(self.device_combo, selected_device)
+        self.device_combo.blockSignals(False)
+
     def _load_settings(self):
         """Load settings values into UI controls."""
-        for i in range(self.theme_combo.count()):
-            if self.theme_combo.itemData(i) == self.settings.theme:
-                self.theme_combo.setCurrentIndex(i)
-                break
-
-        for i in range(self.language_combo.count()):
-            if self.language_combo.itemData(i) == self.settings.language:
-                self.language_combo.setCurrentIndex(i)
-                break
+        self._set_combo_value(self.theme_combo, self.settings.theme)
+        self._set_combo_value(self.language_combo, self.settings.language)
         self.english_info_label.setVisible(self.settings.language == "en")
 
         self.vad_checkbox.setChecked(self.settings.vad_enabled)
 
-        for i in range(self.device_combo.count()):
-            if self.device_combo.itemData(i) == self.settings.device:
-                self.device_combo.setCurrentIndex(i)
-                break
-
-        for i in range(self.output_format_combo.count()):
-            if self.output_format_combo.itemData(i) == self.settings.output_format:
-                self.output_format_combo.setCurrentIndex(i)
-                break
+        self._set_combo_value(self.device_combo, self.settings.device)
+        self._set_combo_value(self.output_format_combo, self.settings.output_format)
 
         if self.settings.models_folder:
             self.models_folder_edit.setText(self.settings.models_folder)
+
+    def _set_combo_value(self, combo: QComboBox, value):
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.setCurrentIndex(i)
+                return
 
     def save_settings(self):
         """Write current UI values back to the settings object."""
@@ -194,9 +207,12 @@ class SettingsPanel(QWidget):
 
     def _refresh_model_status(self):
         """Check whether the currently selected model is present and update the status row."""
-        from engine.model_loader import resolve_model_path, get_model_download_info, validate_model_path
-        from engine.whisper_cpp_runner import validate_ggml_model
-        from core.worker import get_base_path
+        from engine.model_loader import (
+            get_download_size_label,
+            get_model_download_info,
+            is_model_available,
+            resolve_model_path,
+        )
 
         language = self.language_combo.currentData() or "he"
         device = self.device_combo.currentData() or "auto"
@@ -206,19 +222,14 @@ class SettingsPanel(QWidget):
         models_dir = self.models_folder_edit.text().strip() or None
         model_path = resolve_model_path(language, engine, get_base_path(), models_dir)
 
-        model_ready = (
-            validate_ggml_model(model_path) if engine == "whisper-cpp"
-            else validate_model_path(model_path)
-        )
-
         download_info = get_model_download_info(language, engine)
 
-        if model_ready:
+        if is_model_available(model_path, engine):
             self.model_status_label.setText("Ready ✓")
             self.model_status_label.setStyleSheet("color: green;")
             self.download_button.setVisible(False)
         elif download_info:
-            size = "~3 GB" if download_info["type"] == "ct2" else "~1.5 GB"
+            size = get_download_size_label(download_info)
             lang_label = "English" if language == "en" else "Hebrew"
             self.model_status_label.setText(f"Not downloaded ({size})")
             self.model_status_label.setStyleSheet("color: orange;")
@@ -250,7 +261,6 @@ class SettingsPanel(QWidget):
     def _cleanup_unused_models(self):
         """Scan the models folder and offer to delete anything not in the registry."""
         from engine.model_loader import get_all_known_model_names
-        from core.worker import get_base_path
 
         custom_dir = self.models_folder_edit.text().strip()
         base_models_dir = custom_dir if custom_dir else os.path.join(get_base_path(), "Models")

@@ -13,7 +13,6 @@ Features:
 Supports pyaudiowpatch (preferred for WASAPI loopback) and sounddevice (fallback).
 """
 import os
-import time
 import logging
 import threading
 from datetime import datetime, timedelta
@@ -22,7 +21,7 @@ from PySide6.QtCore import QThread, Signal
 
 from engine.audio_capture import AudioBuffer, resample_to_16k_mono
 from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
-from core.worker import get_base_path
+from core.runtime import get_base_path
 
 
 # Minimum buffer duration before transcription (seconds)
@@ -65,7 +64,6 @@ class LiveTranscriptionWorker(QThread):
         return list(self._session_segments)
 
     def run(self):
-        model = None
         cleanup_fn = None
 
         try:
@@ -337,7 +335,7 @@ class LiveTranscriptionWorker(QThread):
             if prompt:
                 kwargs["initial_prompt"] = prompt
 
-            result_segments, info = model.transcribe(audio_16k, **kwargs)
+            result_segments, _info = model.transcribe(audio_16k, **kwargs)
             for seg in result_segments:
                 if self._stop_event.is_set():
                     break

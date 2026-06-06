@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,15 +28,16 @@ def get_whispercpp_binary_path(base_path: str) -> str | None:
 
     # Check system PATH
     try:
-        p = subprocess.Popen(
-            ['whisper-cli', '--help'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            **_POPEN_EXTRA_KWARGS
+        subprocess.run(
+            [exe_name, '--help'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+            **_POPEN_EXTRA_KWARGS,
         )
-        p.communicate(timeout=5)
-        if p.returncode is not None:
-            return 'whisper-cli'  # Available on PATH
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return exe_name
+    except Exception:
         pass
 
     return None
@@ -44,14 +46,16 @@ def get_whispercpp_binary_path(base_path: str) -> str | None:
 def validate_whispercpp_binary(binary_path: str) -> bool:
     """Check if the whisper-cli binary is functional."""
     try:
-        p = subprocess.Popen(
+        subprocess.run(
             [binary_path, '--help'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            **_POPEN_EXTRA_KWARGS
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+            **_POPEN_EXTRA_KWARGS,
         )
-        p.communicate(timeout=10)
         return True
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+    except Exception:
         return False
 
 
@@ -144,73 +148,69 @@ def transcribe_chunk_whispercpp(
     if not use_gpu:
         args.append('--no-gpu')
 
-    process = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **_POPEN_EXTRA_KWARGS
-    )
-
-    # Read stderr for progress updates
-    progress_pattern = re.compile(r'progress\s*=\s*(\d+)%')
-    stderr_lines = []
-
-    if process.stderr:
-        for raw_line in iter(process.stderr.readline, b''):
-            line = raw_line.decode('utf-8', errors='replace')
-            stderr_lines.append(line)
-            if progress_callback:
-                match = progress_pattern.search(line)
-                if match:
-                    progress_callback(int(match.group(1)))
-            if cancel_event and cancel_event.is_set():
-                process.terminate()
-                process.wait()
-                raise InterruptedError("Transcription canceled")
-
-    process.wait()
-
-    stderr_text = ''.join(stderr_lines)
-
-    if process.returncode != 0:
-        logging.error(f"whisper-cli failed (exit code {process.returncode}). Full stderr:\n{stderr_text}")
-        raise RuntimeError(f"whisper-cli failed (exit code {process.returncode}):\n{stderr_text[:2000]}")
-
-    # Check for errors in stderr even if exit code is 0
-    if 'error:' in stderr_text.lower() and 'unknown argument' in stderr_text.lower():
-        raise RuntimeError(f"whisper-cli argument error:\n{stderr_text[:500]}")
-
-    # Parse output files
-    srt_path = output_prefix + '.srt'
-    txt_path = output_prefix + '.txt'
-
-    full_text = ''
-    srt_segments_json = []
-
-    if os.path.isfile(txt_path):
-        with open(txt_path, 'r', encoding='utf-8') as f:
-            full_text = f.read().strip()
-
-    if os.path.isfile(srt_path):
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            srt_content = f.read()
-        segments = parse_srt_content(srt_content)
-        # Convert to JSON format matching transcribe_chunk() output
-        for seg in segments:
-            srt_segments_json.append(json.dumps({
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"]
-            }))
-        # If txt was empty, build it from SRT segments
-        if not full_text:
-            full_text = ' '.join(seg["text"] for seg in segments)
-
-    # Clean up temp dir
     try:
-        import shutil
-        shutil.rmtree(tmp_dir)
-    except Exception:
-        pass
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **_POPEN_EXTRA_KWARGS
+        )
 
-    return full_text, srt_segments_json
+        # Read stderr for progress updates
+        progress_pattern = re.compile(r'progress\s*=\s*(\d+)%')
+        stderr_lines = []
+
+        if process.stderr:
+            for raw_line in iter(process.stderr.readline, b''):
+                line = raw_line.decode('utf-8', errors='replace')
+                stderr_lines.append(line)
+                if progress_callback:
+                    match = progress_pattern.search(line)
+                    if match:
+                        progress_callback(int(match.group(1)))
+                if cancel_event and cancel_event.is_set():
+                    process.terminate()
+                    process.wait()
+                    raise InterruptedError("Transcription canceled")
+
+        process.wait()
+
+        stderr_text = ''.join(stderr_lines)
+
+        if process.returncode != 0:
+            logging.error(f"whisper-cli failed (exit code {process.returncode}). Full stderr:\n{stderr_text}")
+            raise RuntimeError(f"whisper-cli failed (exit code {process.returncode}):\n{stderr_text[:2000]}")
+
+        # Check for errors in stderr even if exit code is 0
+        if 'error:' in stderr_text.lower() and 'unknown argument' in stderr_text.lower():
+            raise RuntimeError(f"whisper-cli argument error:\n{stderr_text[:500]}")
+
+        # Parse output files
+        srt_path = output_prefix + '.srt'
+        txt_path = output_prefix + '.txt'
+
+        full_text = ''
+        srt_segments_json = []
+
+        if os.path.isfile(txt_path):
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                full_text = f.read().strip()
+
+        if os.path.isfile(srt_path):
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                srt_content = f.read()
+            segments = parse_srt_content(srt_content)
+            # Convert to JSON format matching transcribe_chunk() output
+            for seg in segments:
+                srt_segments_json.append(json.dumps({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"]
+                }))
+            # If txt was empty, build it from SRT segments
+            if not full_text:
+                full_text = ' '.join(seg["text"] for seg in segments)
+
+        return full_text, srt_segments_json
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

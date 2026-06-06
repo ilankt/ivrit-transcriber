@@ -5,7 +5,6 @@ Detects NVIDIA CUDA and AMD Vulkan GPUs for hardware acceleration.
 """
 import subprocess
 import sys
-import re
 
 _POPEN_EXTRA_KWARGS = {}
 if sys.platform == 'win32':

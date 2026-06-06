@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QTextCursor
 
+from core.filenames import sanitize_output_stem
+from core.runtime import get_base_path
 from engine.audio_capture import list_loopback_devices
 from core.live_worker import LiveTranscriptionWorker, save_live_session, BUFFER_DURATION_SEC
 
@@ -166,8 +168,7 @@ class LiveTranscriptionPanel(QWidget):
         if idx >= 0 and idx < len(self._devices):
             self.settings.live_audio_device = self._devices[idx]['name']
         folder = self.output_folder_edit.text()
-        if folder:
-            self.settings.live_output_folder = folder
+        self.settings.live_output_folder = folder or None
 
     def _browse_output_folder(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Output Directory")
@@ -190,17 +191,21 @@ class LiveTranscriptionPanel(QWidget):
         os.makedirs(output_folder, exist_ok=True)
 
         # Check that the model is present before starting (live always uses faster-whisper)
-        from engine.model_loader import resolve_model_path, validate_model_path, get_model_download_info
-        from core.worker import get_base_path
+        from engine.model_loader import (
+            get_download_size_label,
+            get_model_download_info,
+            is_model_available,
+            resolve_model_path,
+        )
         models_dir = getattr(self.settings, 'models_folder', None) or None
         model_path = resolve_model_path(
             self.settings.language, "faster-whisper", get_base_path(), models_dir
         )
-        if not validate_model_path(model_path):
+        if not is_model_available(model_path, "faster-whisper"):
             download_info = get_model_download_info(self.settings.language, "faster-whisper")
             if download_info:
                 lang = "English" if self.settings.language == "en" else "Hebrew"
-                size = "~3 GB" if download_info["type"] == "ct2" else "~1.5 GB"
+                size = get_download_size_label(download_info)
                 reply = QMessageBox.question(
                     self, "Model Not Downloaded",
                     f"The {lang} model ({size}) has not been downloaded yet.\n\n"
@@ -341,10 +346,9 @@ class LiveTranscriptionPanel(QWidget):
             session_name = self.session_name_edit.text().strip()
             if not session_name:
                 session_name = f"meeting-{self._session_start_time.strftime('%Y-%m-%d-%H%M%S')}"
-            # Sanitize filename
-            session_name = "".join(
-                c for c in session_name if c.isalnum() or c in (' ', '-', '_')
-            )
+            session_name = sanitize_output_stem(session_name)
+            if not session_name:
+                session_name = f"meeting-{self._session_start_time.strftime('%Y-%m-%d-%H%M%S')}"
 
             output_format = self.settings.output_format
             save_live_session(
