@@ -7,7 +7,7 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 - Transcribe Hebrew audio and video files (MP3, WAV, MP4, MKV, etc.)
 - **Live transcription** — capture system audio (WASAPI loopback) with word-by-word streaming captions
 - Outputs **SRT subtitles**, **plain text**, or both
-- Two model options: **Fast** (turbo) and **Accurate** (full)
+- Standard Whisper large-v3 transcription model
 - **GPU acceleration** — NVIDIA CUDA and AMD Vulkan (auto-detected)
 - **Dark / Light / System theme** support
 - Voice Activity Detection (VAD)
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 ## Models
 
-The app uses [ivrit.ai](https://www.ivrit.ai/) Hebrew Whisper models. Which format you need depends on your setup:
+The app uses the standard large-v3 Whisper model for transcription. Which format you need depends on your setup:
 
 ### For CPU or NVIDIA GPU (CTranslate2 format)
 
@@ -42,8 +42,7 @@ Download and place in `Models/`:
 
 ```
 Models/
-  ivrit-large-v3-turbo-ct2/    # Fast model
-  ivrit-large-v3-ct2/          # Accurate model
+  ivrit-large-v3-ct2/
 ```
 
 Each folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
@@ -53,11 +52,6 @@ Each folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
 Download and place in `Models/`:
 
 ```bash
-# Fast model (1.5 GB)
-huggingface-cli download ivrit-ai/whisper-large-v3-turbo-ggml ggml-model.bin --local-dir Models/tmp-turbo
-mv Models/tmp-turbo/ggml-model.bin Models/ggml-ivrit-large-v3-turbo.bin
-
-# Accurate model (2.9 GB)
 huggingface-cli download ivrit-ai/whisper-large-v3-ggml ggml-model.bin --local-dir Models/tmp-full
 mv Models/tmp-full/ggml-model.bin Models/ggml-ivrit-large-v3.bin
 ```
@@ -106,7 +100,7 @@ python app.py
 ### File Transcription
 
 1. Click **Select File** and choose an audio or video file
-2. Set the output folder and options (model, format, device)
+2. Set the output folder and options (language, format, device)
 3. Click **Start Transcription**
 
 The device dropdown auto-detects available GPUs. Select **Auto** to let the app choose the best option.
@@ -119,7 +113,7 @@ The device dropdown auto-detects available GPUs. Select **Auto** to let the app 
 4. Play audio (YouTube, Zoom, etc.) — words appear in real-time as streaming captions
 5. Click **Stop** to end the session and save the transcript
 
-Live transcription uses the Fast model on CPU for low-latency response, with 1-second audio overlap between buffers and context prompting for accuracy.
+Live transcription uses faster-whisper on CPU for low-latency response, with 1-second audio overlap between buffers and context prompting for accuracy.
 
 ## Building an Executable
 
