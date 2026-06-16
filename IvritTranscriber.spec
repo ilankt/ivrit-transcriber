@@ -9,6 +9,8 @@ a = Analysis(
     datas=[
         ('C:/Users/ilank/AppData/Local/Programs/Python/Python312/Lib/site-packages/faster_whisper/assets', 'faster_whisper/assets'),
         ('ICON.png', '.'),
+        ('Binaries', 'Binaries'),
+        ('Models', 'Models'),
     ],
     hiddenimports=[
         'ctranslate2',

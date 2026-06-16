@@ -4,9 +4,9 @@ import sys
 
 
 def get_base_path() -> str:
-    """Return the app root for source runs and the executable directory for builds."""
+    """Return the app root for source runs and the bundled resource root for builds."""
     if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
