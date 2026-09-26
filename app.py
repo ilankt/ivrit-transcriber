@@ -91,22 +91,20 @@ class FileLoadWorker(QThread):
 
             self._temp_dir = tempfile.mkdtemp(prefix="ivrit_transcriber_job_")
 
-            audio_to_split_path = self.file_path
-
-            if is_video:
-                self.status_updated.emit("Extracting audio from video...")
-                extracted_audio_path = os.path.join(
-                    self._temp_dir, os.path.basename(self.file_path) + ".wav"
-                )
-                err = extract_audio(self.file_path, extracted_audio_path)
-                if err:
-                    raise RuntimeError(f"Audio extraction failed: {err}")
-                audio_to_split_path = extracted_audio_path
+            # Compressed audio containers (including audio-only MP4/M4A) need
+            # decoding too: copying AAC/MP3 packets into WAV is not PCM audio.
+            self.status_updated.emit("Converting audio to 16 kHz mono WAV...")
+            audio_to_split_path = os.path.join(self._temp_dir, "audio.wav")
+            err = extract_audio(self.file_path, audio_to_split_path)
+            if err:
+                raise RuntimeError(f"Audio extraction failed: {err}")
 
             self.status_updated.emit("Splitting audio into chunks...")
             chunk_paths, err = split_audio(audio_to_split_path, 1, self._temp_dir)
             if err:
                 raise RuntimeError(f"Audio splitting failed: {err}")
+            if not chunk_paths:
+                raise RuntimeError("No audio chunks were produced from this file.")
 
             self.status_updated.emit("Preparing chunks...")
             tasks = []
