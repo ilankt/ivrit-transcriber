@@ -117,8 +117,78 @@ def test_homebrew_media_tools_found_without_shell_path(monkeypatch, name):
 
 
 def test_nonzero_whisper_help_is_rejected(monkeypatch):
-    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1, stdout=b'', stderr=b'broken binary'))
     assert not whisper_cpp_runner.validate_whispercpp_binary("broken-whisper-cli")
+
+
+def test_broken_bundled_binary_does_not_hide_working_homebrew(monkeypatch, tmp_path):
+    bundled, homebrew = tmp_path / "bundled", tmp_path / "homebrew"
+    bundled.touch()
+    homebrew.touch()
+    monkeypatch.setattr(whisper_cpp_runner, "_whispercpp_candidates", lambda base: [str(bundled), str(homebrew)])
+    def run(args, **kwargs):
+        if args[0] == str(bundled):
+            raise OSError("Bad CPU type in executable")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", run)
+    assert whisper_cpp_runner.resolve_whispercpp_binary("/app") == (str(homebrew), None)
+
+
+def test_unlinked_homebrew_formula_is_found(monkeypatch):
+    monkeypatch.setattr(whisper_cpp_runner, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(whisper_cpp_runner.shutil, "which", lambda name: None)
+    expected = "/opt/homebrew/opt/whisper.cpp/bin/whisper-cli"
+    monkeypatch.setattr(whisper_cpp_runner.os.path, "isfile", lambda path: path == expected)
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+    assert whisper_cpp_runner.resolve_whispercpp_binary("/app") == (expected, None)
+
+
+def test_binary_failure_preserves_dyld_error_and_path(monkeypatch, tmp_path):
+    binary = tmp_path / "whisper-cli"
+    binary.touch()
+    monkeypatch.setattr(whisper_cpp_runner, "_whispercpp_candidates", lambda base: [str(binary)])
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        returncode=-6, stdout=b'', stderr=b'dyld: Library not loaded: libggml.dylib',
+    ))
+    found, error = whisper_cpp_runner.resolve_whispercpp_binary("/app")
+    assert found is None
+    assert str(binary) in error
+    assert "code -6" in error
+    assert "dyld: Library not loaded: libggml.dylib" in error
+
+
+def test_missing_binary_reports_search_locations(monkeypatch):
+    monkeypatch.setattr(whisper_cpp_runner, "_whispercpp_candidates", lambda base: ["/missing/whisper-cli"])
+    monkeypatch.setattr(whisper_cpp_runner.os.path, "isfile", lambda path: False)
+    found, error = whisper_cpp_runner.resolve_whispercpp_binary("/app")
+    assert found is None
+    assert "was not found" in error
+    assert "/missing/whisper-cli" in error
+
+
+def test_binary_timeout_is_reported(monkeypatch):
+    monkeypatch.setattr(whisper_cpp_runner, "sys", SimpleNamespace(platform="darwin"))
+    def run(*args, **kwargs):
+        assert kwargs["timeout"] == 60
+        raise whisper_cpp_runner.subprocess.TimeoutExpired(
+            "whisper-cli", 60, stderr=b"ggml_metal_library_init: compiling Metal library",
+        )
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", run)
+    error = whisper_cpp_runner.get_whispercpp_binary_error("whisper-cli")
+    assert "Timed out after 60 seconds" in error
+    assert "compiling Metal library" in error
+
+
+def test_successful_metal_help_output_is_accepted(monkeypatch):
+    monkeypatch.setattr(whisper_cpp_runner, "sys", SimpleNamespace(platform="darwin"))
+    def run(*args, **kwargs):
+        assert kwargs["timeout"] == 60
+        return SimpleNamespace(
+            returncode=0, stdout=b'',
+            stderr=b'ggml_metal_device_init: GPU name: MTL0 (Apple M4 Max)\nusage: whisper-cli [options]',
+        )
+    monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", run)
+    assert whisper_cpp_runner.validate_whispercpp_binary("/opt/homebrew/bin/whisper-cli")
 
 
 def test_hebrew_ggml_download_is_renamed_to_registered_path(monkeypatch, tmp_path, qt_app):
@@ -196,8 +266,7 @@ def test_file_worker_auto_metal_uses_ggml_and_gpu(monkeypatch, qt_app, tmp_path)
     from core.jobs import Job, Task, JobStatus
     monkeypatch.setattr(gpu_detector, "detect_all_gpus", metal_info)
     monkeypatch.setattr(worker_module, "sys", SimpleNamespace(platform="darwin"))
-    monkeypatch.setattr(worker_module, "get_whispercpp_binary_path", lambda base: "/opt/homebrew/bin/whisper-cli")
-    monkeypatch.setattr(worker_module, "validate_whispercpp_binary", lambda path: True)
+    monkeypatch.setattr(worker_module, "resolve_whispercpp_binary", lambda base: ("/opt/homebrew/bin/whisper-cli", None))
     monkeypatch.setattr(worker_module, "validate_ggml_model", lambda path: True)
     transcribe = Mock(return_value=("Test transcript", []))
     monkeypatch.setattr(worker_module, "transcribe_chunk_whispercpp", transcribe)

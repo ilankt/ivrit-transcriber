@@ -17,43 +17,83 @@ if sys.platform == 'win32':
     _POPEN_EXTRA_KWARGS['creationflags'] = subprocess.CREATE_NO_WINDOW
 
 
-def get_whispercpp_binary_path(base_path: str) -> str | None:
-    """Find the whisper-cli binary. Returns path or None."""
+def _whispercpp_candidates(base_path: str) -> list[str]:
     exe_name = 'whisper-cli.exe' if sys.platform == 'win32' else 'whisper-cli'
 
     candidates = [os.path.join(base_path, 'Binaries', exe_name), shutil.which(exe_name)]
     if sys.platform == 'darwin':
         # Finder-launched apps do not inherit the shell's Homebrew PATH.
-        candidates.extend(['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli'])
+        for prefix in ('/opt/homebrew', '/usr/local'):
+            candidates.append(f'{prefix}/bin/whisper-cli')
+            # Also find installations whose executable has not been linked into bin.
+            for formula in ('whisper.cpp', 'whisper-cpp'):
+                candidates.append(f'{prefix}/opt/{formula}/bin/whisper-cli')
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def get_whispercpp_binary_path(base_path: str) -> str | None:
+    """Find the first executable candidate without launching it."""
+    candidates = _whispercpp_candidates(base_path)
     for candidate in candidates:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
 
 
+def resolve_whispercpp_binary(base_path: str) -> tuple[str | None, str | None]:
+    """Find a working CLI, retaining startup errors and trying alternative copies."""
+    candidates = _whispercpp_candidates(base_path)
+    failures = []
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        error = get_whispercpp_binary_error(candidate)
+        if error is None:
+            return candidate, None
+        failures.append(f'{candidate}:\n{error}')
+    if failures:
+        return None, "whisper-cli was found but could not start:\n\n" + '\n\n'.join(failures)
+    return None, "whisper-cli was not found. Searched:\n" + '\n'.join(candidates)
+
+
 def whispercpp_setup_hint() -> str:
     if sys.platform == 'darwin':
         return (
-            "Install whisper.cpp with Metal support: brew install whisper.cpp\n"
+            "Check whisper-cli --help in Terminal for startup errors.\n"
+            "If whisper.cpp is not installed: brew install whisper.cpp\n"
             "The app checks Binaries/whisper-cli, PATH, and the standard Homebrew folders."
         )
     return "Place whisper-cli and its runtime libraries in Binaries/ or add it to PATH."
 
 
-def validate_whispercpp_binary(binary_path: str) -> bool:
-    """Check if the whisper-cli binary is functional."""
+def get_whispercpp_binary_error(binary_path: str) -> str | None:
+    """Return the actual startup failure, or None when the CLI can run."""
+    # Homebrew initializes its Metal backend even for --help. A cold start can
+    # compile GPU libraries before printing usage, so allow more time on Macs.
+    timeout = 60 if sys.platform == 'darwin' else 10
     try:
         result = subprocess.run(
             [binary_path, '--help'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=10,
+            timeout=timeout,
             check=False,
             **_POPEN_EXTRA_KWARGS,
         )
-        return result.returncode == 0
-    except Exception:
-        return False
+        if result.returncode == 0:
+            return None
+        output = (result.stderr or result.stdout or b'').decode('utf-8', errors='replace').strip()
+        return f"Exited with code {result.returncode}.\n{output[-4000:]}".strip()
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stderr or exc.stdout or b'').decode('utf-8', errors='replace').strip()
+        return f"Timed out after {timeout} seconds while running --help.\n{output[-4000:]}".strip()
+    except OSError as exc:
+        return str(exc)
+
+
+def validate_whispercpp_binary(binary_path: str) -> bool:
+    """Check if the whisper-cli binary is functional."""
+    return get_whispercpp_binary_error(binary_path) is None
 
 
 def validate_ggml_model(model_path: str) -> bool:

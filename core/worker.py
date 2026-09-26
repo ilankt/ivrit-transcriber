@@ -10,7 +10,7 @@ from core.runtime import determine_engine, get_base_path
 from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
 from engine.transcriber import transcribe_chunk
 from engine.whisper_cpp_runner import (
-    get_whispercpp_binary_path, validate_whispercpp_binary,
+    resolve_whispercpp_binary,
     validate_ggml_model, transcribe_chunk_whispercpp,
     whispercpp_setup_hint,
 )
@@ -87,12 +87,13 @@ class TranscriptionWorker(QRunnable):
             models_dir = getattr(self.settings, 'models_folder', None) or None
             if engine == "whisper-cpp":
                 ggml_path = resolve_model_path(language, "whisper-cpp", base_path, models_dir)
-                binary_path = get_whispercpp_binary_path(base_path)
+                binary_path, binary_error = resolve_whispercpp_binary(base_path)
 
-                if not binary_path or not validate_whispercpp_binary(binary_path):
+                if not binary_path:
+                    logging.error("whisper.cpp startup failed: %s", binary_error)
                     self.signals.job_status_updated.emit(
                         JobStatus.ERROR,
-                        "whisper-cli is missing or cannot run. " + whispercpp_setup_hint()
+                        f"{binary_error}\n\n{whispercpp_setup_hint()}"
                     )
                     return
 
