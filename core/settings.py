@@ -9,7 +9,7 @@ class Settings(BaseModel):
     compute_type: str = "auto"
     output_folder: str | None = None
     models_folder: str | None = None  # Custom models directory; None = default (app dir/Models)
-    device: str = "auto"  # "auto", "cpu", "nvidia", or "amd"
+    device: str = "auto"  # "auto", "cpu", "nvidia", "amd", or "metal"
     output_format: str = "srt"  # "srt", "txt", or "both"
     theme: str = "system"  # "system", "light", or "dark"
     live_audio_device: str | None = None

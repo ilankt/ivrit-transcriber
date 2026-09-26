@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QFileDialog, QMessageBox,
 )
 from PySide6.QtCore import Signal
-from core.runtime import get_base_path
+from core.runtime import get_base_path, determine_engine
 
 
 class SettingsPanel(QWidget):
@@ -147,12 +147,16 @@ class SettingsPanel(QWidget):
         detecting = bool(self.gpu_info.get("detecting"))
         nvidia_info = self.gpu_info.get("nvidia_cuda", {})
         amd_info = self.gpu_info.get("amd_vulkan", {})
+        metal_info = self.gpu_info.get("apple_metal", {})
         nvidia_available = bool(nvidia_info.get("available"))
         amd_available = bool(amd_info.get("available"))
+        metal_available = bool(metal_info.get("available"))
 
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
         auto_label = "Auto (Detecting GPUs...)" if detecting else "Auto (Try GPU, fallback to CPU)"
+        if metal_available:
+            auto_label = "Auto (Apple GPU / Metal)"
         self.device_combo.addItem(auto_label, "auto")
         self.device_combo.addItem("CPU Only", "cpu")
 
@@ -164,11 +168,17 @@ class SettingsPanel(QWidget):
             info = amd_info.get("info", "Detecting") if detecting else amd_info.get("info", "AMD")
             self.device_combo.addItem(f"AMD GPU ({info})", "amd")
 
+        if metal_available or (detecting and selected_device == "metal"):
+            self.device_combo.addItem("Apple GPU (Metal)", "metal")
+
         if not detecting:
             if selected_device == "nvidia" and not nvidia_available:
                 selected_device = "auto"
                 self.settings.device = "auto"
             if selected_device == "amd" and not amd_available:
+                selected_device = "auto"
+                self.settings.device = "auto"
+            if selected_device == "metal" and not metal_available:
                 selected_device = "auto"
                 self.settings.device = "auto"
 
@@ -216,8 +226,8 @@ class SettingsPanel(QWidget):
 
         language = self.language_combo.currentData() or "he"
         device = self.device_combo.currentData() or "auto"
-        # Avoid slow GPU detection: derive engine from saved device value directly.
-        engine = "whisper-cpp" if device == "amd" else "faster-whisper"
+        # Use the same backend as the worker without repeating hardware detection.
+        engine = determine_engine(device, self.gpu_info)
 
         models_dir = self.models_folder_edit.text().strip() or None
         model_path = resolve_model_path(language, engine, get_base_path(), models_dir)

@@ -8,7 +8,7 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 - **Live transcription** — capture system audio (WASAPI loopback) with word-by-word streaming captions
 - Outputs **SRT subtitles**, **plain text**, or both
 - Standard Whisper large-v3 transcription model
-- **GPU acceleration** — NVIDIA CUDA and AMD Vulkan (auto-detected)
+- **GPU acceleration** — NVIDIA CUDA, AMD Vulkan, and Apple Silicon Metal (auto-detected)
 - **Dark / Light / System theme** support
 - Voice Activity Detection (VAD)
 - Progress tracking with ETA
@@ -90,6 +90,40 @@ cp build/bin/Release/ggml-vulkan.dll Binaries/
 ```
 
 Then download the GGML models (see [Models](#for-amd-gpu-ggml-format) above).
+
+## Apple Silicon Mac setup
+
+File transcription on Apple Silicon uses whisper.cpp with Metal when **Auto**
+or **Apple GPU (Metal)** is selected. **CPU Only** continues to use Faster-Whisper.
+Intel Macs use the CPU path. Apple Silicon is also detected when Python runs
+under Rosetta, but native ARM64 Python and Homebrew are recommended.
+
+Install the [Homebrew whisper.cpp package](https://formulae.brew.sh/formula/whisper.cpp)
+and FFmpeg, then set up the app from this repository:
+
+```bash
+brew install whisper.cpp ffmpeg python@3.12
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+In Settings, select **Auto** or **Apple GPU (Metal)** and download the model if
+needed. Hebrew uses `ggml-ivrit-large-v3.bin` (the app renames the downloaded
+`ggml-model.bin`); English uses `ggml-large-v3.bin`. Each download is about 3 GB.
+Existing CTranslate2 model folders are used only by the CPU/NVIDIA backend.
+If your GGML models are already elsewhere, select that folder in Settings.
+
+The app finds `whisper-cli`, `ffmpeg`, and `ffprobe` in PATH and the standard
+Homebrew locations, including when launched from Finder. A missing or broken
+whisper.cpp installation produces a setup error instead of silently selecting
+Faster-Whisper on the CPU. Logs include whisper.cpp's GPU backend initialization.
+Metal inference is provided by [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
+
+This acceleration applies to file transcription. Live transcription still uses
+Faster-Whisper on the CPU on Macs; system-audio capture requires an input device
+provided by an audio loopback driver.
 
 ## Usage
 

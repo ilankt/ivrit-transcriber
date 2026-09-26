@@ -1,10 +1,11 @@
 """
 GPU Detection Utility
 
-Detects NVIDIA CUDA and AMD Vulkan GPUs for hardware acceleration.
+Detects NVIDIA CUDA, AMD Vulkan, and Apple Silicon Metal hardware.
 """
 import subprocess
 import sys
+import platform
 
 _POPEN_EXTRA_KWARGS = {}
 if sys.platform == 'win32':
@@ -86,6 +87,24 @@ def detect_vulkan_gpu() -> tuple[bool, str]:
     return False, "No AMD Vulkan GPU detected"
 
 
+def detect_metal_gpu() -> tuple[bool, str]:
+    """Detect Apple Silicon, including an x86 Python running under Rosetta."""
+    if sys.platform != 'darwin':
+        return False, "Apple Metal requires macOS on Apple Silicon"
+    if platform.machine().lower() in ('arm64', 'aarch64'):
+        return True, "Apple Silicon (Metal)"
+    try:
+        result = subprocess.run(
+            ['/usr/sbin/sysctl', '-n', 'hw.optional.arm64'],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip() == '1':
+            return True, "Apple Silicon (Metal; Python running under Rosetta)"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False, "No Apple Silicon GPU detected"
+
+
 def detect_all_gpus() -> dict:
     """
     Detect all available GPUs.
@@ -94,10 +113,17 @@ def detect_all_gpus() -> dict:
         dict with keys:
             nvidia_cuda: {"available": bool, "info": str}
             amd_vulkan: {"available": bool, "info": str}
+            apple_metal: {"available": bool, "info": str}
     """
-    cuda_available, cuda_info = detect_cuda_gpu()
-    amd_available, amd_info = detect_vulkan_gpu()
+    metal_available, metal_info = detect_metal_gpu()
+    if sys.platform == 'darwin':
+        cuda_available, cuda_info = False, "CUDA is unavailable on macOS"
+        amd_available, amd_info = False, "Vulkan backend is not used on macOS"
+    else:
+        cuda_available, cuda_info = detect_cuda_gpu()
+        amd_available, amd_info = detect_vulkan_gpu()
     return {
         "nvidia_cuda": {"available": cuda_available, "info": cuda_info},
         "amd_vulkan": {"available": amd_available, "info": amd_info},
+        "apple_metal": {"available": metal_available, "info": metal_info},
     }

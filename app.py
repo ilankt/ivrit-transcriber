@@ -63,6 +63,7 @@ def _detecting_gpu_info() -> dict:
         "detecting": True,
         "nvidia_cuda": {"available": False, "info": "Detecting"},
         "amd_vulkan": {"available": False, "info": "Detecting"},
+        "apple_metal": {"available": False, "info": "Detecting"},
     }
 
 
@@ -168,6 +169,9 @@ class ModelDownloadWorker(QThread):
                     progress_cb,
                     cancel_check,
                 )
+                downloaded_path = os.path.join(dest_dir, self.download_info["filename"])
+                if os.path.abspath(downloaded_path) != os.path.abspath(self.model_path):
+                    os.replace(downloaded_path, self.model_path)
             self.finished.emit(True, "")
         except InterruptedError:
             self._cleanup()
@@ -498,7 +502,7 @@ class MainWindow(QMainWindow):
             if stat.free < required_gb * 1024 ** 3:
                 reply = QMessageBox.question(
                     self, "Low Disk Space",
-                    f"Downloading the English model requires ~{required_gb:.0f} GB of free disk space.\n"
+                    f"Downloading this model requires ~{required_gb:.0f} GB of free disk space.\n"
                     f"Available: {stat.free / 1024 ** 3:.1f} GB\n\nContinue anyway?",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No,
@@ -585,7 +589,7 @@ class MainWindow(QMainWindow):
         from engine.model_loader import resolve_model_path, get_model_download_info
 
         device = self.settings.device
-        engine = "whisper-cpp" if device == "amd" else "faster-whisper"
+        engine = determine_engine(device, self.gpu_info)
         base_path = get_base_path()
         models_dir = self.settings.models_folder or None
         model_path = resolve_model_path(self.settings.language, engine, base_path, models_dir)

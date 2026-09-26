@@ -1,5 +1,5 @@
 """
-whisper.cpp subprocess runner for AMD GPU (Vulkan) transcription.
+whisper.cpp subprocess runner for AMD (Vulkan) and Apple Silicon (Metal).
 
 Calls the whisper-cli binary as a subprocess and parses its output.
 """
@@ -21,32 +21,29 @@ def get_whispercpp_binary_path(base_path: str) -> str | None:
     """Find the whisper-cli binary. Returns path or None."""
     exe_name = 'whisper-cli.exe' if sys.platform == 'win32' else 'whisper-cli'
 
-    # Check bundled location first
-    bundled = os.path.join(base_path, 'Binaries', exe_name)
-    if os.path.isfile(bundled):
-        return bundled
-
-    # Check system PATH
-    try:
-        subprocess.run(
-            [exe_name, '--help'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5,
-            check=False,
-            **_POPEN_EXTRA_KWARGS,
-        )
-        return exe_name
-    except Exception:
-        pass
-
+    candidates = [os.path.join(base_path, 'Binaries', exe_name), shutil.which(exe_name)]
+    if sys.platform == 'darwin':
+        # Finder-launched apps do not inherit the shell's Homebrew PATH.
+        candidates.extend(['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli'])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     return None
+
+
+def whispercpp_setup_hint() -> str:
+    if sys.platform == 'darwin':
+        return (
+            "Install whisper.cpp with Metal support: brew install whisper.cpp\n"
+            "The app checks Binaries/whisper-cli, PATH, and the standard Homebrew folders."
+        )
+    return "Place whisper-cli and its runtime libraries in Binaries/ or add it to PATH."
 
 
 def validate_whispercpp_binary(binary_path: str) -> bool:
     """Check if the whisper-cli binary is functional."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             [binary_path, '--help'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -54,7 +51,7 @@ def validate_whispercpp_binary(binary_path: str) -> bool:
             check=False,
             **_POPEN_EXTRA_KWARGS,
         )
-        return True
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -111,6 +108,8 @@ def transcribe_chunk_whispercpp(
     use_gpu: bool = True,
     progress_callback=None,
     cancel_event=None,
+    threads: int = 0,
+    require_metal: bool = False,
 ) -> tuple[str, list[str]]:
     """
     Transcribe an audio chunk using whisper.cpp.
@@ -121,7 +120,7 @@ def transcribe_chunk_whispercpp(
         binary_path: Path to whisper-cli binary
         beam_size: Beam size for decoding
         vad_filter: Whether to use VAD (not directly supported, ignored)
-        use_gpu: Whether to use GPU (Vulkan)
+        use_gpu: Whether to use GPU (Vulkan or Metal, depending on the binary)
         progress_callback: Optional callable(int) for progress percentage
         cancel_event: Optional threading.Event checked for cancellation
 
@@ -147,11 +146,13 @@ def transcribe_chunk_whispercpp(
 
     if not use_gpu:
         args.append('--no-gpu')
+    if threads > 0:
+        args.extend(['--threads', str(threads)])
 
     try:
         process = subprocess.Popen(
             args,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,  # Transcript is read from files; avoid a full pipe.
             stderr=subprocess.PIPE,
             **_POPEN_EXTRA_KWARGS
         )
@@ -164,6 +165,14 @@ def transcribe_chunk_whispercpp(
             for raw_line in iter(process.stderr.readline, b''):
                 line = raw_line.decode('utf-8', errors='replace')
                 stderr_lines.append(line)
+                if 'whisper_backend_init_gpu:' in line:
+                    logging.info(line.strip())
+                    if require_metal and ('no GPU found' in line or 'failed to initialize' in line):
+                        process.terminate()
+                        process.wait()
+                        raise RuntimeError(
+                            "Metal GPU initialization failed. " + whispercpp_setup_hint()
+                        )
                 if progress_callback:
                     match = progress_pattern.search(line)
                     if match:
@@ -188,6 +197,8 @@ def transcribe_chunk_whispercpp(
         # Parse output files
         srt_path = output_prefix + '.srt'
         txt_path = output_prefix + '.txt'
+        if not os.path.isfile(txt_path) and not os.path.isfile(srt_path):
+            raise RuntimeError(f"whisper-cli produced no transcript files:\n{stderr_text[-2000:]}")
 
         full_text = ''
         srt_segments_json = []

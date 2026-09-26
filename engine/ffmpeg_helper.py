@@ -1,6 +1,7 @@
 import ffmpeg
 import json
 import math
+import shutil
 import os
 import subprocess
 import sys
@@ -11,8 +12,20 @@ if sys.platform == 'win32':
     _POPEN_EXTRA_KWARGS['creationflags'] = subprocess.CREATE_NO_WINDOW
 
 
+def _find_executable(name):
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    if sys.platform == 'darwin':
+        for directory in ('/opt/homebrew/bin', '/usr/local/bin'):
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return name
+
+
 def _probe(path):
-    args = ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', path]
+    args = [_find_executable('ffprobe'), '-v', 'error', '-show_format', '-show_streams', '-of', 'json', path]
     p = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         **_POPEN_EXTRA_KWARGS
@@ -54,7 +67,7 @@ def probe_media(path):
 
 def _run_ffmpeg(stream, overwrite_output=True):
     """Run an ffmpeg stream graph with CREATE_NO_WINDOW on Windows."""
-    args = ffmpeg.compile(stream, overwrite_output=overwrite_output)
+    args = ffmpeg.compile(stream, cmd=_find_executable('ffmpeg'), overwrite_output=overwrite_output)
     p = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         **_POPEN_EXTRA_KWARGS

@@ -1,4 +1,5 @@
 import os
+import sys
 from faster_whisper import WhisperModel
 
 _CT2_REQUIRED_FILES = ("model.bin", "tokenizer.json", "vocabulary.json")
@@ -10,7 +11,11 @@ _MODEL_REGISTRY = {
     },
     ("he", "whisper-cpp"): {
         "path": ("Models", "ggml-ivrit-large-v3.bin"),
-        "repo_id": None,
+        "repo_id": "ivrit-ai/whisper-large-v3-ggml",
+        "filename": "ggml-model.bin",
+        "type": "ggml",
+        "size_label": "~3 GB",
+        "required_gb": 3.5,
     },
     ("en", "faster-whisper"): {
         "path": ("Models", "en-large-v3-ct2"),
@@ -24,8 +29,8 @@ _MODEL_REGISTRY = {
         "repo_id": "ggerganov/whisper.cpp",
         "filename": "ggml-large-v3.bin",
         "type": "ggml",
-        "size_label": "~1.5 GB",
-        "required_gb": 1.8,
+        "size_label": "~3 GB",
+        "required_gb": 3.5,
     },
 }
 
@@ -86,6 +91,8 @@ def validate_model_path(path: str) -> bool:
 
 def load_whisper_model(model_path: str, device: str, compute_type: str, threads: int):
     actual_device = device.lower()
+    if actual_device == "auto" and sys.platform == "darwin":
+        actual_device = "cpu"  # Apple GPU inference belongs to whisper.cpp.
 
     if actual_device == "auto":
         try:

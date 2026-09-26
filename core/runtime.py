@@ -10,17 +10,18 @@ def get_base_path() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def determine_engine(device: str) -> str:
+def determine_engine(device: str, gpu_info: dict | None = None) -> str:
     """Return the transcription engine for a saved device setting."""
-    if device == "amd":
+    if device in ("amd", "metal"):
         return "whisper-cpp"
     if device == "auto":
-        from engine.gpu_detector import detect_cuda_gpu, detect_vulkan_gpu
-
-        cuda_ok, _ = detect_cuda_gpu()
-        if cuda_ok:
+        if gpu_info is None:
+            from engine.gpu_detector import detect_all_gpus
+            gpu_info = detect_all_gpus()
+        if gpu_info.get("apple_metal", {}).get("available"):
+            return "whisper-cpp"
+        if gpu_info.get("nvidia_cuda", {}).get("available"):
             return "faster-whisper"
-        amd_ok, _ = detect_vulkan_gpu()
-        if amd_ok:
+        if gpu_info.get("amd_vulkan", {}).get("available"):
             return "whisper-cpp"
     return "faster-whisper"

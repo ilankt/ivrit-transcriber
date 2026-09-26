@@ -86,7 +86,7 @@ class LiveTranscriptionWorker(QThread):
                 return
 
             device_for_loading = self.settings.device
-            if device_for_loading in ("amd", "auto"):
+            if device_for_loading in ("amd", "metal", "auto"):
                 device_for_loading = "cpu"
             elif device_for_loading == "nvidia":
                 device_for_loading = "gpu"

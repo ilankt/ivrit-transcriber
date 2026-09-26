@@ -3,6 +3,7 @@ import shutil
 import time
 import logging
 import threading
+import sys
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 from core.jobs import Job, JobStatus, TaskStatus
 from core.runtime import determine_engine, get_base_path
@@ -11,6 +12,7 @@ from engine.transcriber import transcribe_chunk
 from engine.whisper_cpp_runner import (
     get_whispercpp_binary_path, validate_whispercpp_binary,
     validate_ggml_model, transcribe_chunk_whispercpp,
+    whispercpp_setup_hint,
 )
 from engine.checkpoint import save_chunk_checkpoint, merge_checkpoints_to_files, cleanup_checkpoints
 
@@ -90,7 +92,7 @@ class TranscriptionWorker(QRunnable):
                 if not binary_path or not validate_whispercpp_binary(binary_path):
                     self.signals.job_status_updated.emit(
                         JobStatus.ERROR,
-                        "whisper-cli binary not found. Place whisper-cli.exe in the Binaries/ folder or add it to PATH."
+                        "whisper-cli is missing or cannot run. " + whispercpp_setup_hint()
                     )
                     return
 
@@ -174,6 +176,8 @@ class TranscriptionWorker(QRunnable):
                                 use_gpu=True,
                                 progress_callback=progress_cb,
                                 cancel_event=self._cancel_event,
+                                threads=self.settings.threads,
+                                require_metal=sys.platform == 'darwin' and self.settings.device in ('auto', 'metal'),
                             )
                         else:
                             text, srt_segments = self._run_cancellable(

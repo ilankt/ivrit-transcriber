@@ -4,5 +4,5 @@ ffmpeg-python
 tqdm
 pydantic
 huggingface_hub
-pyaudiowpatch
+pyaudiowpatch; sys_platform == "win32"
 sounddevice
