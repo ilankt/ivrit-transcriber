@@ -1,11 +1,13 @@
 # Ivrit Transcriber
 
-A desktop application for transcribing Hebrew audio and video files. Built with Python, PySide6 (Qt), and [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper). Runs fully offline.
+A desktop application for transcribing Hebrew and English audio and video files on **Windows and macOS**. Built with Python, PySide6 (Qt), [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper), and [whisper.cpp](https://github.com/ggml-org/whisper.cpp). Transcription runs locally and works offline once the required models are downloaded.
+
+**Quick start:** [Windows](#installation) · [Apple Silicon Mac](#apple-silicon-mac-setup) · [Speaker labels (experimental)](#experimental-speaker-labels)
 
 ## Features
 
 - Transcribe Hebrew audio and video files (MP3, WAV, MP4, MKV, etc.)
-- **Live transcription** — capture system audio (WASAPI loopback) with word-by-word streaming captions
+- **Live transcription** — capture system audio with streaming captions; Windows uses WASAPI loopback, while macOS requires an audio loopback input
 - Outputs **SRT subtitles**, **plain text**, or both
 - Standard Whisper large-v3 transcription model
 - **GPU acceleration** — NVIDIA CUDA, AMD Vulkan, and Apple Silicon Metal (auto-detected)
@@ -13,6 +15,56 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 - Voice Activity Detection (VAD)
 - Progress tracking with ETA
 - Custom output filenames
+
+## Platform support
+
+| Platform | File transcription | Live transcription |
+| --- | --- | --- |
+| Windows | CPU, NVIDIA CUDA, or AMD Vulkan | System audio via WASAPI loopback |
+| Apple Silicon Mac | Metal GPU via whisper.cpp; CPU also available | CPU; requires a configured audio loopback input |
+| Intel Mac | CPU via Faster-Whisper | CPU; requires a configured audio loopback input |
+
+Mac users run the app from source using the setup below. The Windows executable
+does not run on macOS, and this repository does not currently provide a packaged
+Mac app. Metal acceleration applies to file transcription, not live transcription.
+
+## Experimental speaker labels
+
+Recorded files can optionally include **Speaker 1**, **Speaker 2**, etc. in TXT
+and SRT exports. The existing transcription model is unchanged; a separate
+[Pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+pipeline detects speakers locally across the entire recording.
+
+Run this experiment from source (existing packaged executables do not contain
+the optional speaker dependencies):
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-speakers.txt
+python app.py
+```
+
+In **Settings > Set Up Speakers**, follow the link to accept the model's Hugging
+Face access conditions, provide a read token, and download the model. The token
+is used only for the download and is not saved by the app. An existing Hugging
+Face login can also be used. The model is stored in the selected Models folder;
+after setup, detection works offline. Pyannote usage telemetry is disabled.
+
+Enable **Detect speakers (recorded files only)**. Leave **Speakers** on Auto or
+choose the known count. Detection runs before transcription and adds processing
+time and memory use. NVIDIA CUDA is used when available and selected; CPU is used
+otherwise, including when transcription uses AMD Vulkan or Apple Metal.
+
+Speaker numbers are assigned in order of first appearance and are consistent
+within a recording, not across recordings. Faster-Whisper uses word timestamps
+to split text at speaker changes. With whisper.cpp, each subtitle segment gets
+its dominant speaker; rapid exchanges inside a segment may be attributed
+incorrectly. Overlapping voices and similar voices can also produce errors.
+Text without an overlapping detected speaker is marked **Speaker unknown**.
+Live transcription does not use this feature.
+
+Cancel/pause during detection takes effect at the next pipeline progress hook;
+during model download, cancellation waits for the current file to finish.
+Turning speaker detection off uses the regular transcription workflow.
 
 ## Requirements
 
@@ -24,7 +76,9 @@ A desktop application for transcribing Hebrew audio and video files. Built with 
 
 ## Installation
 
-```bash
+Windows source installation (Mac users should follow [Mac setup](#apple-silicon-mac-setup)):
+
+```powershell
 git clone https://github.com/ilankt/ivrit-transcriber.git
 cd ivrit-transcriber
 python -m venv .venv
@@ -48,6 +102,9 @@ Models/
 Each folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
 
 ### For AMD GPU (GGML format)
+
+Apple Silicon Metal uses this format too; the Mac setup below can download it
+through Settings.
 
 Download and place in `Models/`:
 
@@ -103,6 +160,8 @@ and FFmpeg, then set up the app from this repository:
 
 ```bash
 brew install whisper.cpp ffmpeg python@3.12
+git clone https://github.com/ilankt/ivrit-transcriber.git
+cd ivrit-transcriber
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -124,6 +183,10 @@ Metal inference is provided by [whisper.cpp](https://github.com/ggml-org/whisper
 This acceleration applies to file transcription. Live transcription still uses
 Faster-Whisper on the CPU on Macs; system-audio capture requires an input device
 provided by an audio loopback driver.
+
+For an Intel Mac, install FFmpeg and Python, use the same source installation
+steps, and select **CPU Only**. Supply the Hebrew CTranslate2 model described
+above, or select English and download its model in Settings.
 
 ## Usage
 
@@ -158,6 +221,18 @@ pyinstaller IvritTranscriber.spec
 
 The executable will be in `dist/IvritTranscriber/`.
 
+Verify the packaged runtime before installing it:
+
+```powershell
+python scripts/smoke_test_exe.py dist/IvritTranscriber/IvritTranscriber.exe
+```
+
+This check starts the actual EXE without showing a window, renders its main
+window, runs bundled voice detection, and decodes generated MP4/M4A samples.
+It writes a JSON report and window image under `logs/`, exits automatically,
+and does not save application settings. A process that merely stays running
+does not count as a successful startup check.
+
 ## Project Structure
 
 ```
@@ -174,7 +249,7 @@ engine/
   checkpoint.py              # Progressive save and final SRT/TXT merge support
   ffmpeg_helper.py           # FFmpeg wrapper (probe, extract, split)
   model_loader.py            # Model registry, validation, downloads, and loading
-  gpu_detector.py            # NVIDIA CUDA and AMD Vulkan detection
+  gpu_detector.py            # NVIDIA CUDA, AMD Vulkan, and Apple Metal detection
   transcriber.py             # Chunk transcription (faster-whisper)
   whisper_cpp_runner.py      # Chunk transcription (whisper.cpp subprocess)
 ui/
