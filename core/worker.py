@@ -22,6 +22,7 @@ class WorkerSignals(QObject):
     task_status_updated = Signal(int, TaskStatus, str)  # task_index, status, message
     job_status_updated = Signal(JobStatus, str)  # status, message
     eta_updated = Signal(str)  # eta_string
+    stage_progress_updated = Signal(int, str)  # percentage within the current step, explanation
     finished = Signal()
 
 
@@ -37,6 +38,9 @@ class TranscriptionWorker(QRunnable):
         self.start_time = 0
         self.processed_audio_duration = 0.0
         self.total_audio_duration = 0.0
+        from engine.progress import StageProgress
+        self.stage_progress = StageProgress(steps=3 if self.settings.diarization_enabled else 1)
+        self._pause_started = None
 
     def _get_base_name(self):
         if self.job.custom_output_filename:
@@ -98,6 +102,7 @@ class TranscriptionWorker(QRunnable):
                     pause_check=lambda: self.is_paused,
                     status_callback=lambda message: self.signals.job_status_updated.emit(
                         JobStatus.RUNNING, message),
+                    progress_callback=self.signals.stage_progress_updated.emit,
                 )
                 self.signals.job_status_updated.emit(JobStatus.RUNNING, "Loading transcription model...")
             if engine == "whisper-cpp":
@@ -182,10 +187,11 @@ class TranscriptionWorker(QRunnable):
                         return
 
                     try:
-                        if engine == "whisper-cpp":
-                            def progress_cb(pct, _i=i):
-                                self.signals.progress_updated.emit(_i, pct / 100.0)
+                        def progress_cb(pct, _i=i):
+                            self.signals.progress_updated.emit(_i, pct / 100.0)
+                            self._emit_eta(task.duration * pct / 100.0)
 
+                        if engine == "whisper-cpp":
                             text, srt_segments = transcribe_chunk_whispercpp(
                                 audio_path=task.chunk_path,
                                 model_path=ggml_path,
@@ -198,6 +204,7 @@ class TranscriptionWorker(QRunnable):
                                 cancel_event=self._cancel_event,
                                 threads=self.settings.threads,
                                 require_metal=sys.platform == 'darwin' and self.settings.device in ('auto', 'metal'),
+                                word_timestamps=self.settings.diarization_enabled,
                             )
                         else:
                             text, srt_segments = self._run_cancellable(
@@ -205,6 +212,7 @@ class TranscriptionWorker(QRunnable):
                                 task.chunk_path, model, language, beam_size, self.settings.vad_enabled,
                                 cancel_event=self._cancel_event,
                                 word_timestamps=self.settings.diarization_enabled,
+                                progress_callback=lambda fraction: progress_cb(100 * fraction),
                             )
                         if speaker_turns is not None:
                             from engine.diarization import label_segments
@@ -334,22 +342,20 @@ class TranscriptionWorker(QRunnable):
         except Exception as e:
             logging.warning(f"Could not clean up checkpoint files: {e}")
 
-    def _emit_eta(self):
-        elapsed_time = time.time() - self.start_time
-        if self.processed_audio_duration > 0 and elapsed_time > 0:
-            throughput = self.processed_audio_duration / elapsed_time
-            remaining_audio_duration = self.total_audio_duration - self.processed_audio_duration
-            if throughput > 0 and remaining_audio_duration > 0:
-                remaining_time_seconds = remaining_audio_duration / throughput
-                m, s = divmod(remaining_time_seconds, 60)
-                h, m = divmod(m, 60)
-                eta_string = f"~{int(h):02}:{int(m):02}:{int(s):02} remaining"
-                self.signals.eta_updated.emit(eta_string)
+    def _emit_eta(self, current_chunk_duration=0):
+        stage = 3 if self.settings.diarization_enabled else 1
+        self.signals.stage_progress_updated.emit(*self.stage_progress.update(
+            stage, self.processed_audio_duration + current_chunk_duration, self.total_audio_duration))
 
     def pause(self):
+        if not self.is_paused:
+            self._pause_started = time.monotonic()
         self.is_paused = True
 
     def resume(self):
+        if self._pause_started is not None:
+            self.stage_progress.exclude_duration(time.monotonic() - self._pause_started)
+            self._pause_started = None
         self.is_paused = False
 
     def cancel(self):

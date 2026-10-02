@@ -5,6 +5,7 @@ Calls the whisper-cli binary as a subprocess and parses its output.
 """
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -138,6 +139,56 @@ def parse_srt_content(srt_text: str) -> list[dict]:
     return segments
 
 
+def parse_json_segments(data: dict) -> list[dict]:
+    """Keep full subtitle text and group timed subword tokens into whole words.
+
+    Older CLIs split UTF-8 bytes between JSON token strings. Read the JSON with
+    surrogateescape and repair only after joining each word's token fragments.
+    Incomplete timings fall back to the original segment without losing text.
+    """
+    special_token_start = 50257 if data.get("model", {}).get("multilingual", True) else 50256
+
+    def repair(text):
+        return text.encode("utf-8", errors="surrogateescape").decode("utf-8")
+
+    segments = []
+    for source in data["transcription"]:
+        start = float(source["offsets"]["from"]) / 1000
+        end = float(source["offsets"]["to"]) / 1000
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+            raise ValueError("Invalid whisper.cpp segment timestamps")
+        segment = {"start": start, "end": end, "text": repair(source["text"])}
+        groups = []
+        for token in source.get("tokens", []):
+            if token.get("id", special_token_start) >= special_token_start:
+                continue
+            fragment = token["text"]
+            if not fragment:
+                continue
+            if not groups or fragment[0].isspace():
+                groups.append({"parts": [], "times": []})
+            group = groups[-1]
+            group["parts"].append(fragment)
+            offsets = token.get("offsets", {})
+            if "from" in offsets and "to" in offsets:
+                a, b = float(offsets["from"]) / 1000, float(offsets["to"]) / 1000
+                if math.isfinite(a) and math.isfinite(b) and start <= a <= b <= end:
+                    group["times"].append((a, b))
+        words = []
+        for group in groups:
+            if not group["times"]:
+                break
+            words.append({"word": repair("".join(group["parts"])),
+                          "start": min(t[0] for t in group["times"]),
+                          "end": max(t[1] for t in group["times"])})
+        if (words and len(words) == len(groups)
+                and "".join(w["word"] for w in words).strip() == segment["text"].strip()
+                and all(a["end"] <= b["start"] for a, b in zip(words, words[1:]))):
+            segment["words"] = words
+        segments.append(segment)
+    return segments
+
+
 def transcribe_chunk_whispercpp(
     audio_path: str,
     model_path: str,
@@ -150,6 +201,7 @@ def transcribe_chunk_whispercpp(
     cancel_event=None,
     threads: int = 0,
     require_metal: bool = False,
+    word_timestamps: bool = False,
 ) -> tuple[str, list[str]]:
     """
     Transcribe an audio chunk using whisper.cpp.
@@ -163,6 +215,7 @@ def transcribe_chunk_whispercpp(
         use_gpu: Whether to use GPU (Vulkan or Metal, depending on the binary)
         progress_callback: Optional callable(int) for progress percentage
         cancel_event: Optional threading.Event checked for cancellation
+        word_timestamps: Include word timings for speaker changes within subtitles
 
     Returns:
         (full_text, srt_segments_json_list)
@@ -188,6 +241,9 @@ def transcribe_chunk_whispercpp(
         args.append('--no-gpu')
     if threads > 0:
         args.extend(['--threads', str(threads)])
+    if word_timestamps:
+        # Full JSON enables token timestamps without shortening the subtitles.
+        args.append('--output-json-full')
 
     try:
         process = subprocess.Popen(
@@ -247,17 +303,22 @@ def transcribe_chunk_whispercpp(
             with open(txt_path, 'r', encoding='utf-8') as f:
                 full_text = f.read().strip()
 
-        if os.path.isfile(srt_path):
+        segments = None
+        json_path = output_prefix + '.json'
+        if word_timestamps and os.path.isfile(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8', errors='surrogateescape') as f:
+                    segments = parse_json_segments(json.load(f))
+            except (ValueError, KeyError, TypeError, UnicodeError):
+                logging.warning("Invalid whisper.cpp word timings; using subtitle timestamps")
+        if segments is None and os.path.isfile(srt_path):
             with open(srt_path, 'r', encoding='utf-8') as f:
                 srt_content = f.read()
             segments = parse_srt_content(srt_content)
+        if segments is not None:
             # Convert to JSON format matching transcribe_chunk() output
             for seg in segments:
-                srt_segments_json.append(json.dumps({
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "text": seg["text"]
-                }))
+                srt_segments_json.append(json.dumps(seg, ensure_ascii=False))
             # If txt was empty, build it from SRT segments
             if not full_text:
                 full_text = ' '.join(seg["text"] for seg in segments)

@@ -1,8 +1,10 @@
 """Optional, local speaker diarization and timestamp-based transcript labeling."""
 import importlib.metadata
 import json
+import logging
 import os
 from pathlib import Path
+import sys
 import wave
 
 MODEL_REPO = "ivrit-ai/pyannote-speaker-diarization-3.1"
@@ -109,8 +111,22 @@ def _load_pipeline(path):
     return pipeline
 
 
+def _configure_speaker_assignment(pipeline, num_speakers):
+    """Keep distinct local voices distinct in a known two-person conversation.
+
+    Pyannote's default independently picks the nearest voice centroid for each
+    local track. Both tracks may choose the same speaker, even with an explicit
+    count. Joint assignment respects the local model's separation of voices.
+    Public tests improved for two speakers but regressed on a four-speaker
+    clip, so leave other counts, Auto, and trained thresholds unchanged.
+    """
+    if num_speakers == 2:
+        pipeline.clustering.constrained_assignment = True
+
+
 def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
-                   cancel_event=None, status_callback=None, pause_check=None):
+                   cancel_event=None, status_callback=None, pause_check=None,
+                   progress_callback=None):
     """Cluster the whole recording so labels are shared across every chunk.
 
     Input is the same decoded 16 kHz mono PCM used by transcription. Passing
@@ -118,12 +134,20 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
     Cancellation waits for the next pipeline hook, so no abandoned inference
     thread keeps using audio or GPU resources after the worker finishes.
     """
+    from engine.progress import StageProgress
+    progress = StageProgress()
+
     def checkpoint():
         import time
+        paused_at = time.monotonic()
+        paused = False
         while pause_check and pause_check():
+            paused = True
             if cancel_event and cancel_event.is_set():
                 raise InterruptedError("Speaker detection canceled")
             time.sleep(0.1)
+        if paused:
+            progress.exclude_duration(time.monotonic() - paused_at)
         if cancel_event and cancel_event.is_set():
             raise InterruptedError("Speaker detection canceled")
 
@@ -145,10 +169,38 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
     pipeline = _load_pipeline(path)
     if pipeline is None:
         raise RuntimeError("Could not load the speaker model. Download it again in Settings.")
-    use_cuda = device in ("auto", "nvidia") and torch.cuda.is_available()
+    from engine.speaker_devices import select_speaker_backend
+    backend = select_speaker_backend(device, torch, sys.platform)
+    used_cuda = backend == "cuda"
+    accelerator = None
+    segmentation_accelerator = None
+    gpu_unavailable = backend == "cpu" and device in ("nvidia", "amd", "metal")
     try:
-        if use_cuda:
-            pipeline.to(torch.device("cuda"))
+        if backend != "cpu":
+            if status_callback:
+                status_callback("Preparing speaker GPU acceleration (first use may take a moment)...")
+            try:
+                if backend == "cuda":
+                    pipeline.to(torch.device("cuda"))
+                elif backend == "mps":
+                    from engine.speaker_metal import enable_metal
+                    accelerator = enable_metal(pipeline)
+                else:
+                    from engine.speaker_directml import enable_directml
+                    accelerator = enable_directml(pipeline, path)
+            except Exception:
+                logging.exception("Speaker GPU setup unavailable; using CPU")
+                # CUDA transfer may have moved only part of the pipeline.
+                if backend == "cuda":
+                    pipeline = _load_pipeline(path)
+                backend = "cpu"
+                gpu_unavailable = True
+        if backend in ("mps", "directml"):
+            try:
+                from engine.speaker_segmentation import enable_segmentation_gpu
+                segmentation_accelerator = enable_segmentation_gpu(pipeline, path, backend)
+            except Exception:
+                logging.exception("Speech filter GPU setup unavailable; keeping speech detection on CPU")
         checkpoint()
         pieces = []
         for chunk_path in chunk_paths:
@@ -163,16 +215,47 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
 
         def hook(step_name, step_artifact, file=None, total=None, completed=None):
             checkpoint()
-            progress = f" ({min(completed, total)}/{total})" if total and completed is not None else ""
-            message = f"Detecting speakers: {step_name}{progress}"
+            if progress_callback and step_name in ("segmentation", "embeddings") and total:
+                stage_number = 1 if step_name == "segmentation" else 2
+                progress_callback(*progress.update(stage_number, completed or 0, total))
+            elif progress_callback and step_name == "discrete_diarization":
+                progress_callback(100, "Step 2/3 — 100% of voice comparison — Finalizing speaker labels…")
+            stage = {"segmentation": "finding speech", "speaker_counting": "counting voices",
+                     "embeddings": "comparing voices", "discrete_diarization": "assigning speakers"}.get(step_name, step_name)
+            active_adapter = segmentation_accelerator if step_name == "segmentation" else accelerator
+            on_gpu = (backend == "cuda" and step_name in ("segmentation", "embeddings")) or (
+                step_name in ("segmentation", "embeddings") and active_adapter is not None and active_adapter.accelerated)
+            gpu_name = {"cuda": "CUDA", "mps": "Metal", "directml": "DirectML"}.get(backend)
+            processing_device = f"GPU ({gpu_name})" if on_gpu else "CPU"
+            if on_gpu and step_name == "segmentation" and backend != "cuda":
+                processing_device = f"GPU + CPU ({gpu_name})"
+            unavailable = (step_name in ("segmentation", "embeddings") and backend in ("mps", "directml")
+                           and (active_adapter is None or not active_adapter.accelerated))
+            if gpu_unavailable or unavailable:
+                processing_device = "CPU; GPU acceleration unavailable"
+            message = f"Detecting speakers: {stage} — {processing_device}"
             if status_callback and message != last_status[0]:
                 status_callback(message)
                 last_status[0] = message
 
         kwargs = {"num_speakers": num_speakers} if num_speakers > 0 else {}
+        _configure_speaker_assignment(pipeline, num_speakers)
         with torch.inference_mode():
-            result = pipeline({"waveform": torch.from_numpy(waveform).unsqueeze(0),
-                               "sample_rate": 16000}, hook=hook, **kwargs)
+            audio_input = {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": 16000}
+            try:
+                result = pipeline(audio_input, hook=hook, **kwargs)
+            except (RuntimeError, NotImplementedError):
+                if backend != "cuda":
+                    raise
+                logging.exception("CUDA speaker inference failed; retrying on CPU")
+                checkpoint()  # Do not restart if the user canceled during GPU execution.
+                backend = "cpu"
+                gpu_unavailable = True
+                if status_callback:
+                    status_callback("Speaker GPU failed; retrying speaker detection on CPU...")
+                pipeline = _load_pipeline(path)
+                _configure_speaker_assignment(pipeline, num_speakers)
+                result = pipeline(audio_input, hook=hook, **kwargs)
         checkpoint()
         annotation = result
         turns = sorted((float(turn.start), float(turn.end), speaker)
@@ -187,8 +270,13 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
         return normalized
     finally:
         del pipeline
-        if use_cuda:
-            torch.cuda.empty_cache()
+        del accelerator
+        del segmentation_accelerator
+        if used_cuda:
+            try:
+                torch.cuda.empty_cache()
+            except RuntimeError:
+                logging.warning("Could not clear CUDA cache after speaker detection")
 
 
 def _speaker_for(start, end, turns):

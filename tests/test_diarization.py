@@ -125,7 +125,19 @@ def test_cancel_before_inference_does_not_load_optional_libraries():
         diarization.diarize_chunks([], "missing", cancel_event=event)
 
 
-def test_pipeline_receives_entire_recording_and_normalizes_speakers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("device,platform,acceleration,expected_device", [
+    ("cpu", "win32", "ready", "CPU"),
+    ("amd", "win32", "ready", "GPU (DirectML)"),
+    ("auto", "win32", "ready", "GPU (DirectML)"),
+    ("amd", "win32", "setup_error", "CPU; GPU acceleration unavailable"),
+    ("amd", "win32", "runtime_error", "CPU; GPU acceleration unavailable"),
+    ("metal", "darwin", "ready", "GPU (Metal)"),
+    ("auto", "darwin", "ready", "GPU (Metal)"),
+    ("metal", "darwin", "setup_error", "CPU; GPU acceleration unavailable"),
+    ("metal", "darwin", "runtime_error", "CPU; GPU acceleration unavailable"),
+])
+def test_pipeline_receives_entire_recording_and_normalizes_speakers(
+        tmp_path, monkeypatch, device, platform, acceleration, expected_device):
     import numpy as np
     chunks = []
     for index in range(2):
@@ -148,6 +160,7 @@ def test_pipeline_receives_entire_recording_and_normalizes_speakers(tmp_path, mo
         assert file["sample_rate"] == 16000 and num_speakers == 2
         assert file["waveform"][0, 20000] == pytest.approx(1000 / 32768)
         hook("segmentation", None, total=2, completed=2)
+        hook("embeddings", None, total=2, completed=2)
         return annotation
 
     pipeline = Mock(side_effect=apply)
@@ -156,17 +169,119 @@ def test_pipeline_receives_entire_recording_and_normalizes_speakers(tmp_path, mo
         cuda=SimpleNamespace(is_available=lambda: False),
         from_numpy=lambda array: SimpleNamespace(unsqueeze=lambda dim: array[np.newaxis]),
         inference_mode=nullcontext,
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
+    accelerator = Mock(return_value=SimpleNamespace(accelerated=acceleration == "ready"))
+    if acceleration == "setup_error":
+        accelerator.side_effect = RuntimeError("GPU unavailable")
+    monkeypatch.setitem(sys.modules, "engine.speaker_directml", SimpleNamespace(enable_directml=accelerator))
+    monkeypatch.setitem(sys.modules, "engine.speaker_metal", SimpleNamespace(enable_metal=accelerator))
+    speech_accelerator = Mock(return_value=SimpleNamespace(accelerated=acceleration == "ready"))
+    monkeypatch.setitem(sys.modules, "engine.speaker_segmentation", SimpleNamespace(enable_segmentation_gpu=speech_accelerator))
+    monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(diarization, "_load_pipeline", loader)
     monkeypatch.setattr(diarization, "dependency_error", lambda: None)
     monkeypatch.setattr(diarization, "model_available", lambda path: True)
     statuses = []
-    turns = diarization.diarize_chunks(chunks, "local-model", num_speakers=2, status_callback=statuses.append)
+    progress = []
+    turns = diarization.diarize_chunks(chunks, "local-model", device=device, num_speakers=2,
+                                      status_callback=statuses.append, progress_callback=lambda *args: progress.append(args))
     assert len(calls) == 1
+    assert pipeline.clustering.constrained_assignment is True
     loader.assert_called_once_with("local-model")
     assert turns == [(0.1, 0.8, "Speaker 1"), (1.0, 1.5, "Speaker 2"), (1.5, 2.0, "Speaker 1")]
-    assert statuses[-1] == "Detecting speakers: segmentation (2/2)"
+    speech_device = expected_device.replace("GPU (", "GPU + CPU (")
+    assert statuses[-2] == f"Detecting speakers: finding speech — {speech_device}"
+    assert statuses[-1] == f"Detecting speakers: comparing voices — {expected_device}"
+    assert progress[0] == (100, "Step 1/3 — 100% of step — Step complete")
+    assert progress[1] == (100, "Step 2/3 — 100% of step — Step complete")
+    assert accelerator.call_count == (0 if device == "cpu" else 1)
+
+
+@pytest.mark.parametrize("failure", [None, "setup", "inference", "cancel"])
+@pytest.mark.parametrize("num_speakers", [0, 2])
+def test_cuda_inference_and_recovery_do_not_swallow_cancellation(tmp_path, monkeypatch, failure, num_speakers):
+    import numpy as np
+    audio_path = tmp_path / "audio.wav"
+    with wave.open(str(audio_path), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x00" * 32000)
+    result = Mock()
+    result.itertracks.return_value = [(SimpleNamespace(start=0.0, end=1.0), "track", "a")]
+
+    def infer(file, hook, **kwargs):
+        assert kwargs == ({"num_speakers": 2} if num_speakers else {})
+        if num_speakers:
+            assert gpu.clustering.constrained_assignment is True
+        hook("embeddings", None, total=1, completed=1)
+        if failure == "inference":
+            raise RuntimeError("CUDA out of memory")
+        if failure == "cancel":
+            raise InterruptedError("Canceled by user")
+        return result
+
+    gpu = Mock(side_effect=infer)
+    if failure == "setup":
+        gpu.to.side_effect = RuntimeError("CUDA initialization failed")
+
+    def cpu_infer(file, hook, **kwargs):
+        assert kwargs == ({"num_speakers": 2} if num_speakers else {})
+        if num_speakers:
+            assert cpu.clustering.constrained_assignment is True
+        hook("embeddings", None, total=1, completed=1)
+        return result
+
+    cpu = Mock(side_effect=cpu_infer)
+    loader = Mock(side_effect=[gpu, cpu])
+    torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True, empty_cache=Mock()),
+                            device=lambda name: name, inference_mode=nullcontext,
+                            from_numpy=lambda array: SimpleNamespace(unsqueeze=lambda dim: array[np.newaxis]))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(diarization, "_load_pipeline", loader)
+    monkeypatch.setattr(diarization, "dependency_error", lambda: None)
+    monkeypatch.setattr(diarization, "model_available", lambda path: True)
+    statuses = []
+    if failure == "cancel":
+        with pytest.raises(InterruptedError):
+            diarization.diarize_chunks([str(audio_path)], "model", device="nvidia", num_speakers=num_speakers, status_callback=statuses.append)
+        assert loader.call_count == 1
+        cpu.assert_not_called()
+    else:
+        turns = diarization.diarize_chunks([str(audio_path)], "model", device="nvidia", num_speakers=num_speakers, status_callback=statuses.append)
+        assert turns == [(0.0, 1.0, "Speaker 1")]
+        if failure:
+            assert loader.call_count == 2 and cpu.call_count == 1
+            assert "CPU; GPU acceleration unavailable" in statuses[-1]
+        else:
+            assert loader.call_count == 1
+            assert "GPU (CUDA)" in statuses[-1]
+    gpu.to.assert_called_once_with("cuda")
+    torch.cuda.empty_cache.assert_called_once()
+
+
+def test_known_speakers_cannot_collapse_distinct_local_tracks():
+    import numpy as np
+    from pyannote.audio.pipelines.clustering import AgglomerativeClustering
+    clustering = AgglomerativeClustering()
+    pipeline = SimpleNamespace(clustering=clustering)
+    # Two clear voice prototypes, then two less clear but locally distinct tracks.
+    embeddings = np.array([[[1., 0.], [0., 1.]], [[.8, .6], [.9, .435]]])
+    indices = (np.array([0, 0]), np.array([0, 1]), np.array([0, 1]))
+    old, _, _ = clustering.assign_embeddings(embeddings, *indices, constrained=False)
+    assert old[1].tolist() == [0, 0]
+    diarization._configure_speaker_assignment(pipeline, 2)
+    corrected, _, _ = clustering.assign_embeddings(
+        embeddings, *indices, constrained=clustering.constrained_assignment)
+    assert corrected.tolist() == [[0, 1], [1, 0]]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, 4])
+def test_other_speaker_counts_keep_original_assignment(count):
+    clustering = SimpleNamespace(constrained_assignment=False)
+    diarization._configure_speaker_assignment(SimpleNamespace(clustering=clustering), count)
+    assert clustering.constrained_assignment is False
 
 
 def test_zero_length_word_uses_speaker_at_timestamp():
@@ -224,6 +339,7 @@ def test_worker_labels_both_backends_only_when_enabled(qt_app, monkeypatch, tmp_
     worker.signals.job_status_updated.connect(lambda status, _: statuses.append(status), Qt.DirectConnection)
     worker.run()
     assert statuses[-1] == JobStatus.DONE
+    assert all(call.kwargs.get("word_timestamps") is enabled for call in transcribe.call_args_list)
     output = (tmp_path / "source.srt").read_text()
     assert "00:01:00,000 --> 00:01:03,000" in output
     if enabled:

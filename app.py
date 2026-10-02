@@ -339,6 +339,7 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.status_label)
 
         self.eta_label = QLabel("")
+        self.eta_label.setWordWrap(True)
         status_layout.addWidget(self.eta_label)
 
         status_group_box.setLayout(status_layout)
@@ -409,6 +410,7 @@ class MainWindow(QMainWindow):
         self.file_type_label.setText("Loading...")
         self.file_duration_label.setText("Loading...")
         self.status_label.setText("Processing file...")
+        self.progress_bar.setFormat("%p%")
         self.progress_bar.setValue(0)
         self.eta_label.setText("")
         self.select_file_button.setEnabled(False)
@@ -719,6 +721,7 @@ class MainWindow(QMainWindow):
         self.active_worker.signals.task_status_updated.connect(self._update_task_status)
         self.active_worker.signals.progress_updated.connect(self._update_progress)
         self.active_worker.signals.eta_updated.connect(self._update_eta)
+        self.active_worker.signals.stage_progress_updated.connect(self._update_stage_progress)
         self.active_worker.signals.finished.connect(self._worker_finished)
 
         self.thread_pool.start(self.active_worker)
@@ -752,6 +755,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"{status.value}: {message}")
 
             if status in [JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELED]:
+                self.eta_label.setText("")
                 self.start_button.setEnabled(True)
                 self.pause_button.setEnabled(False)
                 self.resume_button.setEnabled(False)
@@ -778,6 +782,11 @@ class MainWindow(QMainWindow):
 
     def _update_eta(self, eta_string):
         self.eta_label.setText(eta_string)
+
+    def _update_stage_progress(self, percent, description):
+        self.progress_bar.setFormat("%p% of current step")
+        self.progress_bar.setValue(percent)
+        self.eta_label.setText(description)
 
     def _worker_finished(self):
         self.active_worker = None

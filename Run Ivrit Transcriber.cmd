@@ -13,6 +13,8 @@ goto run
 if errorlevel 1 goto failed
 "build\ivrit-speaker-env\Scripts\python.exe" -m pip install -r requirements.txt -r requirements-speakers.txt
 if errorlevel 1 goto failed
+"build\ivrit-speaker-env\Scripts\python.exe" scripts\setup_speaker_acceleration.py
+if errorlevel 1 goto failed
 :run
 "build\ivrit-speaker-env\Scripts\python.exe" app.py
 if errorlevel 1 goto failed

@@ -1,7 +1,7 @@
 from faster_whisper import WhisperModel
 import json
 
-def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_size: int, vad_filter: bool, cancel_event=None, word_timestamps=False):
+def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_size: int, vad_filter: bool, cancel_event=None, word_timestamps=False, progress_callback=None):
     segments, _info = model.transcribe(
         audio_path,
         language=language,
@@ -26,5 +26,7 @@ def transcribe_chunk(audio_path: str, model: WhisperModel, language: str, beam_s
             data["words"] = [{"start": w.start, "end": w.end, "word": w.word}
                              for w in segment.words]
         srt_segments.append(json.dumps(data))
+        if progress_callback and _info.duration > 0:
+            progress_callback(min(1.0, max(0.0, segment.end / _info.duration)))
 
     return " ".join(all_text), srt_segments

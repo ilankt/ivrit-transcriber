@@ -11,10 +11,18 @@ A desktop application for transcribing Hebrew and English audio and video files 
 - Outputs **SRT subtitles**, **plain text**, or both
 - Standard Whisper large-v3 transcription model
 - **GPU acceleration** — NVIDIA CUDA, AMD Vulkan, and Apple Silicon Metal (auto-detected)
+- **Optional speaker labels** — local Speaker 1 / Speaker 2 labels, with word-level speaker changes in recorded-file exports (experimental)
 - **Dark / Light / System theme** support
 - Voice Activity Detection (VAD)
-- Progress tracking with ETA
+- Step-by-step progress, completion percentages, and estimated time remaining
 - Custom output filenames
+
+The latest source version includes GPU-assisted speaker detection and improved
+two-speaker separation. On Windows, launch **Run Ivrit Transcriber.cmd**; use
+`--setup` to install or repair its optional dependencies. Existing packaged
+releases do not include these new speaker features. See the
+[speaker setup guide](#experimental-speaker-labels) and
+[validation notes](docs/speaker-recognition-testing.md) for requirements and known limitations.
 
 ## Platform support
 
@@ -55,14 +63,69 @@ after setup, detection works offline. Pyannote usage telemetry is disabled.
 
 Enable **Detect speakers (recorded files only)**. Leave **Speakers** on Auto or
 choose the known count. Detection runs before transcription and adds processing
-time and memory use. NVIDIA CUDA is used when available and selected; CPU is used
-otherwise, including when transcription uses AMD Vulkan or Apple Metal.
+time and memory use. Speaker acceleration follows the selected device:
+
+| Selected device | Speaker processing | Validation |
+| --- | --- | --- |
+| NVIDIA GPU | PyTorch CUDA for segmentation and embeddings | Device routing and CPU recovery tested; native NVIDIA run still needed |
+| AMD GPU on Windows | DirectML for speech filters and the embedding encoder; CPU for recurrent tracking and clustering | Inference and full transcription/export tested on RX 7600M XT |
+| Apple GPU (Metal) | PyTorch MPS for speech filters and the embedding encoder; CPU for recurrent tracking and clustering | Device routing, adapter math, and recovery tested; native Apple Silicon run still needed |
+| CPU Only | CPU for all stages | Tested |
+
+Auto prefers CUDA on Windows/Linux, MPS on a compatible Mac, and DirectML on
+Windows without CUDA. CPU Only never initializes a speaker GPU. A Mac needs
+native ARM64 Python and an MPS-compatible macOS/PyTorch installation for Metal;
+the current optional PyTorch 2.7.1 package set does not support Intel macOS wheels.
+
+The Windows launcher chooses accelerator dependencies during first setup or
+`--setup`: CUDA when `nvidia-smi` detects NVIDIA, otherwise DirectML. For manual
+setup, run this **after** installing the regular and speaker dependencies:
+
+```powershell
+python scripts/setup_speaker_acceleration.py
+```
+
+NVIDIA setup installs matching CUDA-enabled Torch and TorchAudio wheels from
+PyTorch's official index, replacing a CPU-only installation. CUDA 12.8 is the
+default; `--backend cuda --cuda-version cu126` or `cu118` can be used for a
+compatible older driver/GPU combination. Drivers must already support the
+selected CUDA build. On Apple Silicon no extra accelerator package is required;
+Metal is included in native PyTorch. See [PyTorch installation options](https://pytorch.org/get-started/previous-versions/#v271)
+and [MPS requirements](https://docs.pytorch.org/docs/2.7/notes/mps.html).
+
+To explicitly install the Windows DirectML path:
+
+```powershell
+python -m pip install -r requirements-speakers-amd.txt
+python -m pip install --force-reinstall --no-deps onnxruntime-directml==1.24.4
+```
+
+The final reinstall prevents the CPU ONNX package required by Faster-Whisper
+from overwriting DirectML's shared runtime files. The first DirectML run creates
+local derived ONNX models beside the downloaded weights; subsequent runs reuse
+them offline. Finding speech shows **GPU + CPU** on AMD/Metal because the filters
+use the GPU while recurrent tracking stays on CPU. Near-silent windows also use
+CPU to preserve numerical accuracy. Progress shows which stages use GPU or CPU. If GPU initialization
+or execution fails, processing continues on CPU and the status reports the
+fallback. DirectML and Metal retry a failed filter/embedding batch on CPU; a CUDA failure
+restarts speaker analysis on CPU. Cancellation is preserved during recovery.
+DirectML currently uses the default Windows graphics adapter; multi-adapter
+selection still needs validation.
+
+Beneath the status, **Step 1/3**, **Step 2/3**, and **Step 3/3** indicate finding
+speech, comparing voices, and transcription. The progress bar and percentage
+refer to the current step. Time remaining is estimated from that step's measured
+throughput, excludes pauses, and initially shows **Estimating time remaining**.
+With speaker detection disabled, transcription is **Step 1/1**.
 
 Speaker numbers are assigned in order of first appearance and are consistent
-within a recording, not across recordings. Faster-Whisper uses word timestamps
-to split text at speaker changes. With whisper.cpp, each subtitle segment gets
-its dominant speaker; rapid exchanges inside a segment may be attributed
-incorrectly. Overlapping voices and similar voices can also produce errors.
+within a recording, not across recordings. Both Faster-Whisper and whisper.cpp
+use word timestamps to split text at speaker changes. If word timings are
+missing or incomplete, a subtitle keeps its full text and dominant speaker.
+Selecting **2 speakers** also keeps locally distinct voices from both choosing
+the same speaker label during voice matching. This improves separation but
+does not guarantee accuracy: overlapping voices, timing errors, and similar
+voices can still produce incorrect labels.
 Text without an overlapping detected speaker is marked **Speaker unknown**.
 Live transcription does not use this feature.
 

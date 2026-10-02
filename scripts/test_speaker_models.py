@@ -62,9 +62,15 @@ def main():
     parser.add_argument("--backend", choices=["app", "community", "ivrit"], required=True)
     parser.add_argument("--sample-dir", type=Path, default=ROOT / "build/speaker-sample")
     parser.add_argument("--speakers", type=int, default=0, help="0 = automatic")
+    parser.add_argument("--device", choices=["cpu", "auto", "nvidia", "amd", "metal"], default="cpu",
+                        help="Device for the integrated app backend")
+    parser.add_argument("--require-gpu", action="store_true",
+                        help="Fail if app inference does not use a GPU or falls back to CPU")
     parser.add_argument("--ivrit-numpy-workaround", action="store_true",
                         help="Test-only fix for ivrit 0.2.6's missing module-level NumPy import")
     args = parser.parse_args()
+    if args.backend != "app" and (args.device != "cpu" or args.require_gpu):
+        parser.error("Device selection and --require-gpu are supported by --backend app")
     report = {"backend": args.backend, "requested_speakers": args.speakers,
               "ivrit_numpy_workaround": args.ivrit_numpy_workaround,
               "fixture": "synthetic English A/B/A/B; no overlapping voices", "versions": {}}
@@ -81,7 +87,14 @@ def main():
             path = model_path(str(ROOT))
             if not model_available(path):
                 download_model(path)
-            detected = diarize_chunks([str(audio_path)], path, device="cpu", num_speakers=args.speakers)
+            report["requested_device"] = args.device
+            report["statuses"] = []
+            detected = diarize_chunks([str(audio_path)], path, device=args.device,
+                                     num_speakers=args.speakers, status_callback=report["statuses"].append)
+            report["gpu_used"] = any("GPU (" in status for status in report["statuses"])
+            report["gpu_fallback"] = any("unavailable" in status or "retrying" in status for status in report["statuses"])
+            if args.require_gpu and (not report["gpu_used"] or report["gpu_fallback"]):
+                raise RuntimeError("Requested GPU acceleration did not complete successfully")
         elif args.backend == "community":
             import numpy as np
             import torch
@@ -127,6 +140,8 @@ def main():
                                     for frame in traceback.extract_tb(error.__traceback__)]
     report["elapsed_seconds"] = round(time.monotonic() - started, 2)
     suffix = "-numpy-workaround" if args.ivrit_numpy_workaround else ""
+    if args.device != "cpu":
+        suffix += f"-{args.device}"
     destination = args.sample_dir / f"{args.backend}-{args.speakers}{suffix}-report.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2), encoding="utf-8")

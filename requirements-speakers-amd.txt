@@ -1,0 +1,5 @@
+# Windows AMD acceleration for the existing Pyannote 3.3.2 speaker model.
+# Install after the normal requirements. Reinstall the runtime last if a CPU
+# onnxruntime package overwrites its shared Python module (see README).
+onnx==1.23.1; sys_platform == "win32"
+onnxruntime-directml==1.24.4; sys_platform == "win32"
