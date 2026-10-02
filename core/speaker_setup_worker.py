@@ -21,7 +21,7 @@ class SpeakerSetupWorker(QThread):
         except Exception:
             # Hub exceptions may contain HTTP details; do not display/log tokens.
             self.result.emit(False,
-                "Download failed. Check your connection, accept the model's access conditions, "
-                "and use a Hugging Face read token with access to this model. Then retry.")
+                "Download failed. Check your connection and available disk space, then retry. "
+                "The public ivrit.ai speaker model normally needs no access token.")
         finally:
             self.token = None

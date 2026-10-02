@@ -1,11 +1,12 @@
-# Isolated ivrit.ai comparison environment; do not install into the app's
-# Community-1 environment (which uses pyannote.audio 4.x).
+# ivrit.ai wrapper comparison dependencies; the app now also uses Pyannote 3.x.
+# Do not install these into the separate Community-1 (Pyannote 4.x) environment.
 ivrit==0.2.6
 pyannote.audio==3.3.2
 torch==2.7.1
 torchaudio==2.7.1
 huggingface-hub==0.36.0
 faster-whisper==1.2.1
+av>=11,<19
 stable-ts-whisperless>=2.18.3
 imageio-ffmpeg>=0.4.0
 matplotlib

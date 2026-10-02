@@ -30,14 +30,39 @@ segmentation model, and the Pyannote WeSpeaker embedding model. The published
 assets downloaded successfully using the existing environment. This does not
 establish that every user's account/setup can download them.
 
-The app still uses Community-1. This branch only adds the test harness and
-records the comparison; the ivrit integration has not replaced the app's
-speaker implementation.
+At the time of these first tests the app still used Community-1. The subsequent
+integration below changes that on this testing branch.
+
+## Source app integration
+
+The source app now uses the same ivrit.ai Pyannote 3.1 model directly through
+Pyannote 3.3.2. It loads local segmentation and embedding files and uses the
+app's existing speaker-to-word assignment, avoiding the ivrit wrapper's missing
+NumPy import entirely. Downloads are anonymous by default and stored in the
+configured Models folder. Community-1 is no longer required by this branch.
+
+Use **Run Ivrit Transcriber.cmd** from the project root on Windows. It selects
+`build/ivrit-speaker-env` explicitly, so a system Python or a different active
+virtual environment cannot accidentally launch the app without speaker support.
+The initial setup requires Python 3.12. Alternatively, activate that environment
+before running `python app.py`.
+
+The integrated app backend passed the synthetic A/B/A/B speaker check with
+automatic counting, with actual model-detected intervals rather than the supplied
+reference intervals. Re-run this check with `--backend app`.
+
+The complete source-app worker also passed an offline run of that sample using
+the local English Whisper model on CPU: media loading, speaker inference,
+word-timed transcription, and both TXT/SRT exports containing Speaker 1 and
+Speaker 2. This run exposed a Faster-Whisper 1.2.1 incompatibility with PyAV 19;
+the app now constrains PyAV below 19 and includes a real decoder regression test.
+The full automated suite passes 66 tests. This still does not validate accuracy
+on real Hebrew conversations.
 
 ## Repeat the checks
 
-Create a separate environment because the ivrit experiment uses Pyannote 3.x,
-while the app's Community-1 feature requires Pyannote 4.x:
+Use a Pyannote 3.x environment for the app and ivrit experiment; retain a separate
+Pyannote 4.x environment only if comparing Community-1:
 
 ```powershell
 python -m venv build/ivrit-speaker-env
@@ -52,8 +77,7 @@ The first inference command reproduces the upstream wrapper error. The next two
 apply the explicit workaround. The generator requires the Windows desktop David
 and Zira voices and produces no user-derived audio.
 
-In an environment with the app's `requirements.txt` and
-`requirements-speakers.txt` installed, compare Community-1:
+In a separate environment with Pyannote 4.x installed, compare Community-1:
 
 ```powershell
 python scripts/test_speaker_models.py --backend community --speakers 2

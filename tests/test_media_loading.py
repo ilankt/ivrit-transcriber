@@ -58,6 +58,18 @@ def read_pcm(path):
         return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
 
 
+def test_whisper_decoder_accepts_prepared_audio(tmp_path):
+    """Exercise the actual ASR decoder API, not just external FFmpeg decoding."""
+    from faster_whisper.audio import decode_audio
+    source = tmp_path / "prepared.wav"
+    with wave.open(str(source), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(np.full(16000, 1000, dtype="<i2").tobytes())
+    decoded = decode_audio(str(source))
+    assert decoded.shape == (16000,)
+    assert decoded[0] == pytest.approx(1000 / 32768)
+
+
 @pytest.mark.parametrize("extension,video,codec", [
     ("m4a", False, "aac"),
     ("mp4", False, "aac"),

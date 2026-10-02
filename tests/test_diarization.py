@@ -148,7 +148,7 @@ def test_pipeline_receives_entire_recording_and_normalizes_speakers(tmp_path, mo
         assert file["sample_rate"] == 16000 and num_speakers == 2
         assert file["waveform"][0, 20000] == pytest.approx(1000 / 32768)
         hook("segmentation", None, total=2, completed=2)
-        return SimpleNamespace(exclusive_speaker_diarization=annotation)
+        return annotation
 
     pipeline = Mock(side_effect=apply)
     loader = Mock(return_value=pipeline)
@@ -158,7 +158,7 @@ def test_pipeline_receives_entire_recording_and_normalizes_speakers(tmp_path, mo
         inference_mode=nullcontext,
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
-    monkeypatch.setitem(sys.modules, "pyannote.audio", SimpleNamespace(Pipeline=SimpleNamespace(from_pretrained=loader)))
+    monkeypatch.setattr(diarization, "_load_pipeline", loader)
     monkeypatch.setattr(diarization, "dependency_error", lambda: None)
     monkeypatch.setattr(diarization, "model_available", lambda path: True)
     statuses = []

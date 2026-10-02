@@ -59,7 +59,7 @@ def evaluate(reference, detected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["community", "ivrit"], required=True)
+    parser.add_argument("--backend", choices=["app", "community", "ivrit"], required=True)
     parser.add_argument("--sample-dir", type=Path, default=ROOT / "build/speaker-sample")
     parser.add_argument("--speakers", type=int, default=0, help="0 = automatic")
     parser.add_argument("--ivrit-numpy-workaround", action="store_true",
@@ -76,12 +76,25 @@ def main():
     started = time.monotonic()
     try:
         audio_path, reference = prepare_sample(args.sample_dir)
-        if args.backend == "community":
+        if args.backend == "app":
             from engine.diarization import diarize_chunks, download_model, model_available, model_path
             path = model_path(str(ROOT))
             if not model_available(path):
                 download_model(path)
             detected = diarize_chunks([str(audio_path)], path, device="cpu", num_speakers=args.speakers)
+        elif args.backend == "community":
+            import numpy as np
+            import torch
+            from huggingface_hub import snapshot_download
+            from pyannote.audio import Pipeline
+            path = snapshot_download("pyannote/speaker-diarization-community-1")
+            pipeline = Pipeline.from_pretrained(path)
+            with wave.open(str(audio_path), "rb") as audio:
+                waveform = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").astype(np.float32) / 32768
+            kwargs = {"num_speakers": args.speakers} if args.speakers else {}
+            result = pipeline({"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": 16000}, **kwargs)
+            detected = [(turn.start, turn.end, speaker) for turn, _, speaker
+                        in result.exclusive_speaker_diarization.itertracks(yield_label=True)]
         else:
             # The same narrow allowlist used by ivrit.ai's official RunPod image.
             import torch

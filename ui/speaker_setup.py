@@ -15,16 +15,15 @@ class SpeakerSetupDialog(QDialog):
         layout = QVBoxLayout(self)
         help_text = QLabel(
             'Label recorded audio as Speaker 1, Speaker 2, etc. Processing stays on this computer.<br><br>'
-            f'1. <a href="{MODEL_URL}">Accept the Community-1 model access conditions</a>.<br>'
-            '2. <a href="https://huggingface.co/settings/tokens">Create a Hugging Face read token</a> '
-            'and paste it below.<br>3. Download the model once. The token is not saved.'
+            f'Download the <a href="{MODEL_URL}">ivrit.ai speaker model</a> once, '
+            'then use it offline.<br>No Hugging Face account or token is required for these public model files.'
         )
         help_text.setWordWrap(True)
         help_text.setOpenExternalLinks(True)
         layout.addWidget(help_text)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("Read token (or leave blank to use your Hugging Face login)")
+        self.token_edit.setPlaceholderText("Optional Hugging Face token (normally leave blank; not saved)")
         layout.addWidget(self.token_edit)
         self.status = QLabel()
         self.status.setWordWrap(True)

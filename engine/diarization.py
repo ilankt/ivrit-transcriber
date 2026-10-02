@@ -5,10 +5,15 @@ import os
 from pathlib import Path
 import wave
 
-MODEL_REPO = "pyannote/speaker-diarization-community-1"
-MODEL_FOLDER = "speaker-diarization-community-1"
+MODEL_REPO = "ivrit-ai/pyannote-speaker-diarization-3.1"
+MODEL_FOLDER = "ivrit-pyannote-speaker-diarization-3.1"
 MODEL_URL = f"https://huggingface.co/{MODEL_REPO}"
 _READY_FILE = ".ivrit-ready.json"
+_ASSETS = (
+    (MODEL_REPO, "config.yaml", "config.yaml"),
+    ("ivrit-ai/pyannote-segmentation-3.0", "pytorch_model.bin", "segmentation.bin"),
+    ("pyannote/wespeaker-voxceleb-resnet34-LM", "pytorch_model.bin", "embedding.bin"),
+)
 
 
 def model_path(base_path, models_folder=None):
@@ -18,13 +23,13 @@ def model_path(base_path, models_folder=None):
 def dependency_error():
     try:
         version = importlib.metadata.version("pyannote.audio")
-        if int(version.split(".")[0]) == 4:
+        if version == "3.3.2":
             return None
     except (importlib.metadata.PackageNotFoundError, ValueError):
         pass
     return (
-        "Speaker detection needs the optional speaker dependencies.\n"
-        "From the source app's Python environment, run:\n"
+        "This Python environment is missing the speaker dependencies.\n"
+        "Use Run Ivrit Transcriber.cmd in the project folder, or install into this environment:\n"
         "python -m pip install -r requirements-speakers.txt\n"
         "Then restart the app. A packaged app needs a build with speaker support."
     )
@@ -53,27 +58,55 @@ def download_model(path, token=None, progress=None, cancel_check=None):
             raise InterruptedError("Speaker model download canceled")
 
     check_cancel()
-    api = HfApi(token=token or None)
-    info = api.model_info(MODEL_REPO)
-    revision = info.sha
-    files = api.list_repo_files(MODEL_REPO, revision=revision)
-    files = [name for name in files if name != ".gitattributes" and not name.endswith(".gif")]
+    # These are the public assets published/used by ivrit.ai's pipeline.
+    # Do not let a stale saved token prevent downloading public models.
+    access_token = token or False
+    api = HfApi(token=access_token)
     manifest = {}
-    for index, name in enumerate(files):
+    revisions = {}
+    root = Path(path)
+    root.mkdir(parents=True, exist_ok=True)
+    import shutil
+    for index, (repo, name, local_name) in enumerate(_ASSETS):
         check_cancel()
+        revision = api.model_info(repo).sha
+        revisions[repo] = revision
         downloaded = hf_hub_download(
-            MODEL_REPO, name, revision=revision, local_dir=path, token=token or None,
+            repo, name, revision=revision, token=access_token,
         )
-        manifest[name] = os.path.getsize(downloaded)
+        destination = root / local_name
+        temporary = root / (local_name + ".tmp")
+        shutil.copyfile(downloaded, temporary)
+        temporary.replace(destination)
+        manifest[local_name] = destination.stat().st_size
         if progress:
-            progress(int(100 * (index + 1) / len(files)))
+            progress(int(100 * (index + 1) / len(_ASSETS)))
     check_cancel()
     if "config.yaml" not in manifest:
         raise RuntimeError("The speaker model download has no pipeline configuration.")
-    root = Path(path)
     temporary = root / (_READY_FILE + ".tmp")
-    temporary.write_text(json.dumps({"revision": revision, "files": manifest}), encoding="utf-8")
+    temporary.write_text(json.dumps({"revisions": revisions, "files": manifest}), encoding="utf-8")
     temporary.replace(root / _READY_FILE)
+
+
+def _load_pipeline(path):
+    """Load only local assets, without ivrit's buggy label-assignment wrapper."""
+    import torch
+    import yaml
+    from pyannote.audio import Model
+    from pyannote.audio.core.task import Problem, Resolution, Specifications
+    from pyannote.audio.pipelines import SpeakerDiarization
+
+    # Same narrow allowlist as ivrit.ai's RunPod image, rather than unrestricted loading.
+    torch.serialization.add_safe_globals([Problem, Resolution, Specifications, torch.torch_version.TorchVersion])
+    root = Path(path)
+    config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    params = dict(config["pipeline"]["params"])
+    params["segmentation"] = Model.from_pretrained(str(root / "segmentation.bin"))
+    params["embedding"] = Model.from_pretrained(str(root / "embedding.bin"))
+    pipeline = SpeakerDiarization(**params)
+    pipeline.instantiate(config["params"])
+    return pipeline
 
 
 def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
@@ -107,10 +140,9 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
     os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
     import numpy as np
     import torch
-    from pyannote.audio import Pipeline
 
     checkpoint()
-    pipeline = Pipeline.from_pretrained(path)
+    pipeline = _load_pipeline(path)
     if pipeline is None:
         raise RuntimeError("Could not load the speaker model. Download it again in Settings.")
     use_cuda = device in ("auto", "nvidia") and torch.cuda.is_available()
@@ -131,7 +163,7 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
 
         def hook(step_name, step_artifact, file=None, total=None, completed=None):
             checkpoint()
-            progress = f" ({completed}/{total})" if total and completed is not None else ""
+            progress = f" ({min(completed, total)}/{total})" if total and completed is not None else ""
             message = f"Detecting speakers: {step_name}{progress}"
             if status_callback and message != last_status[0]:
                 status_callback(message)
@@ -142,7 +174,7 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
             result = pipeline({"waveform": torch.from_numpy(waveform).unsqueeze(0),
                                "sample_rate": 16000}, hook=hook, **kwargs)
         checkpoint()
-        annotation = result.exclusive_speaker_diarization
+        annotation = result
         turns = sorted((float(turn.start), float(turn.end), speaker)
                        for turn, _, speaker in annotation.itertracks(yield_label=True))
         labels = {}

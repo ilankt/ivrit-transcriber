@@ -32,7 +32,7 @@ Mac app. Metal acceleration applies to file transcription, not live transcriptio
 
 Recorded files can optionally include **Speaker 1**, **Speaker 2**, etc. in TXT
 and SRT exports. The existing transcription model is unchanged; a separate
-[Pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+[ivrit.ai Pyannote model](https://huggingface.co/ivrit-ai/pyannote-speaker-diarization-3.1)
 pipeline detects speakers locally across the entire recording.
 
 Run this experiment from source (existing packaged executables do not contain
@@ -43,10 +43,14 @@ python -m pip install -r requirements.txt -r requirements-speakers.txt
 python app.py
 ```
 
-In **Settings > Set Up Speakers**, follow the link to accept the model's Hugging
-Face access conditions, provide a read token, and download the model. The token
-is used only for the download and is not saved by the app. An existing Hugging
-Face login can also be used. The model is stored in the selected Models folder;
+On Windows, **Run Ivrit Transcriber.cmd** opens the source app in its dedicated
+`build/ivrit-speaker-env` environment (and installs it on first use using Python
+3.12). Pass `--setup` to repair/install dependencies in an existing environment. Running
+`python app.py` from another Python environment will not use those dependencies.
+
+In **Settings > Set Up Speakers**, download the public model files. No access
+token is normally required. An optional token is used only for the download and
+is not saved by the app. The models are stored in the selected Models folder;
 after setup, detection works offline. Pyannote usage telemetry is disabled.
 
 Enable **Detect speakers (recorded files only)**. Leave **Speakers** on Auto or

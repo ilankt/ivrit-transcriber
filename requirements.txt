@@ -1,5 +1,7 @@
 PySide6
 faster-whisper
+# Faster-Whisper 1.2.1 still passes metadata_errors to av.open (removed in PyAV 19).
+av>=11,<19
 ffmpeg-python
 tqdm
 pydantic
