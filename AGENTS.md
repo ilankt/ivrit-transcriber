@@ -16,13 +16,15 @@ pip install -r requirements.txt
 
 Run the application locally with `python app.py`. Build the Windows executable with `pyinstaller IvritTranscriber.spec`; output is written under `dist/IvritTranscriber/`. FFmpeg must be available on `PATH`, and required models must exist under `Models/`.
 
+For reproducible source development, install `requirements-lock.txt` and `requirements-test.txt`. The separate `requirements-speakers-lock.txt` captures the tested Windows/Python 3.12 speaker runtime; do not combine these two runtime snapshots. The Windows launcher uses the speaker snapshot. Keep job records, cached audio, corrections, and hardware test output out of Git.
+
 ## Coding Style & Naming Conventions
 
 Use standard Python style: 4-space indentation, `snake_case` for functions and variables, `PascalCase` for Qt classes, and `UPPER_CASE` for constants. Keep modules focused on their current responsibility; avoid moving UI code into `engine/` or subprocess/media logic into `ui/`. Prefer explicit error handling around FFmpeg, model loading, filesystem cleanup, and Qt worker boundaries.
 
 ## Testing Guidelines
 
-No automated test suite is currently tracked. Before submitting changes, run `python app.py` and smoke-test the touched workflow, such as file loading, settings persistence, live transcription startup, or output generation. When adding tests, use `pytest`, place them under `tests/`, and name files `test_<module>.py`.
+Run `python -m pytest -q` for the automated suite in `tests/`. Tests for optional speaker adapters skip when their dependencies are absent; use the speaker-enabled environment for full coverage. Before submitting changes, run `python app.py --smoke-test-report logs/source-smoke-report.json` to render the GUI and exercise VAD and media decoding without saving settings. Also smoke-test touched hardware workflows when the required models and devices are available. Name new pytest files `test_<module>.py`.
 
 ## Commit & Pull Request Guidelines
 

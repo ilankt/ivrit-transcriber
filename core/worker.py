@@ -4,8 +4,11 @@ import time
 import logging
 import threading
 import sys
+from uuid import uuid4
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot
 from core.jobs import Job, JobStatus, TaskStatus
+from core.job_store import save_job, job_checkpoints, release_audio
+from core.filenames import sanitize_output_stem
 from core.runtime import determine_engine, get_base_path
 from engine.model_loader import load_whisper_model, validate_model_path, resolve_model_path
 from engine.transcriber import transcribe_chunk
@@ -14,14 +17,15 @@ from engine.whisper_cpp_runner import (
     validate_ggml_model, transcribe_chunk_whispercpp,
     whispercpp_setup_hint,
 )
-from engine.checkpoint import save_chunk_checkpoint, merge_checkpoints_to_files, cleanup_checkpoints
+from engine.checkpoint import (
+    save_chunk_checkpoint, merge_checkpoints_to_files, cleanup_checkpoints, load_all_checkpoints,
+)
 
 
 class WorkerSignals(QObject):
     progress_updated = Signal(int, float)  # task_index, progress
     task_status_updated = Signal(int, TaskStatus, str)  # task_index, status, message
     job_status_updated = Signal(JobStatus, str)  # status, message
-    eta_updated = Signal(str)  # eta_string
     stage_progress_updated = Signal(int, str)  # percentage within the current step, explanation
     finished = Signal()
 
@@ -30,7 +34,11 @@ class TranscriptionWorker(QRunnable):
     def __init__(self, job: Job, settings):
         super().__init__()
         self.job = job
-        self.settings = settings.model_copy(deep=True)
+        from core.settings import Settings
+        self.settings = (Settings.model_validate(job.settings_snapshot) if job.record_path and job.settings_snapshot
+                         else settings.model_copy(deep=True))
+        if job.record_path:
+            job.settings_snapshot = self.settings.model_dump()
         self.signals = WorkerSignals()
         self.is_paused = False
         self.is_canceled = False
@@ -41,47 +49,67 @@ class TranscriptionWorker(QRunnable):
         from engine.progress import StageProgress
         self.stage_progress = StageProgress(steps=3 if self.settings.diarization_enabled else 1)
         self._pause_started = None
+        self._checkpoint_name = f"{self._get_base_name()[:100]}-{uuid4().hex}"
 
     def _get_base_name(self):
         if self.job.custom_output_filename:
-            return self.job.custom_output_filename
-        return os.path.splitext(os.path.basename(self.job.original_file_path))[0]
+            return sanitize_output_stem(self.job.custom_output_filename) or "transcript"
+        return sanitize_output_stem(os.path.splitext(os.path.basename(self.job.original_file_path))[0]) or "transcript"
 
-    def _run_cancellable(self, fn, *args, **kwargs):
-        """Run a function in a daemon thread, allowing immediate cancellation."""
-        result = [None]
-        error = [None]
+    def _merge_results(self):
+        checkpoints = (job_checkpoints(self.job) if self.job.record_path else
+                       load_all_checkpoints(self.job.output_dir, self._checkpoint_name))
+        return merge_checkpoints_to_files(
+            self.job.output_dir, self._get_base_name(), checkpoints=checkpoints,
+            output_format=self.settings.output_format,
+        )
 
-        def target():
-            try:
-                result[0] = fn(*args, **kwargs)
-            except Exception as e:
-                error[0] = e
+    def _report_status(self, status, message):
+        self.job.status = status
+        self.job.error_message = message if status in (JobStatus.ERROR, JobStatus.CANCELED) else None
+        try:
+            save_job(self.job)
+        except OSError:
+            logging.exception("Could not persist job status")
+        self.signals.job_status_updated.emit(status, message)
 
-        t = threading.Thread(target=target, daemon=True)
-        t.start()
-
-        while t.is_alive():
-            if self._cancel_event.is_set():
-                raise InterruptedError("Transcription canceled")
-            t.join(timeout=0.2)
-
-        if error[0]:
-            raise error[0]
-        return result[0]
+    def _save_chunk(self, task, offset):
+        task.progress = 1.0
+        if self.job.record_path:
+            save_job(self.job)
+        else:
+            save_chunk_checkpoint(self.job.output_dir, self._checkpoint_name, task.chunk_index,
+                                  task.text, task.srt_segments, task.duration, start_offset=offset)
 
     @Slot()
     def run(self):
-        self.signals.job_status_updated.emit(JobStatus.RUNNING, "Starting job")
+        self._report_status(JobStatus.RUNNING, "Starting job")
         model = None
         self.start_time = time.time()
         cleanup_temp = False
 
-        engine = determine_engine(self.settings.device)
         language = self.settings.language
         base_path = get_base_path()
 
         try:
+            if self.is_canceled:
+                raise InterruptedError("Transcription canceled")
+            engine = determine_engine(self.settings.device)
+            if not self.job.tasks:
+                raise ValueError("No audio chunks are available for transcription.")
+            if self.job.record_path and all(task.status == TaskStatus.DONE for task in self.job.tasks):
+                self._merge_results()
+                self._report_status(JobStatus.DONE, "Saved completed transcript")
+                cleanup_temp = True
+                return
+            for task in self.job.tasks:
+                if self.job.record_path and task.status == TaskStatus.DONE:
+                    continue
+                task.status = TaskStatus.PENDING
+                task.progress = 0.0
+                task.text = ""
+                task.srt_segments = []
+                task.error_message = None
             beam_size = 3
 
             logging.info(f"Starting transcription for {self.job.original_file_path}")
@@ -89,8 +117,8 @@ class TranscriptionWorker(QRunnable):
 
             # Engine-specific setup
             models_dir = getattr(self.settings, 'models_folder', None) or None
-            speaker_turns = None
-            if self.settings.diarization_enabled:
+            speaker_turns = self.job.speaker_turns
+            if self.settings.diarization_enabled and speaker_turns is None:
                 from engine.diarization import diarize_chunks, model_path
                 os.makedirs(self.job.output_dir, exist_ok=True)
                 speaker_turns = diarize_chunks(
@@ -100,25 +128,27 @@ class TranscriptionWorker(QRunnable):
                     num_speakers=self.settings.diarization_speakers,
                     cancel_event=self._cancel_event,
                     pause_check=lambda: self.is_paused,
-                    status_callback=lambda message: self.signals.job_status_updated.emit(
+                    status_callback=lambda message: self._report_status(
                         JobStatus.RUNNING, message),
                     progress_callback=self.signals.stage_progress_updated.emit,
                 )
-                self.signals.job_status_updated.emit(JobStatus.RUNNING, "Loading transcription model...")
+                self.job.speaker_turns = speaker_turns
+                save_job(self.job)
+                self._report_status(JobStatus.RUNNING, "Loading transcription model...")
             if engine == "whisper-cpp":
                 ggml_path = resolve_model_path(language, "whisper-cpp", base_path, models_dir)
                 binary_path, binary_error = resolve_whispercpp_binary(base_path)
 
                 if not binary_path:
                     logging.error("whisper.cpp startup failed: %s", binary_error)
-                    self.signals.job_status_updated.emit(
+                    self._report_status(
                         JobStatus.ERROR,
                         f"{binary_error}\n\n{whispercpp_setup_hint()}"
                     )
                     return
 
                 if not validate_ggml_model(ggml_path):
-                    self.signals.job_status_updated.emit(
+                    self._report_status(
                         JobStatus.ERROR,
                         f"GGML model not found: {ggml_path}\nDownload the GGML model and place it in the Models/ folder."
                     )
@@ -131,7 +161,7 @@ class TranscriptionWorker(QRunnable):
                 logging.info(f"Model path: {model_path}")
 
                 if not validate_model_path(model_path):
-                    self.signals.job_status_updated.emit(
+                    self._report_status(
                         JobStatus.ERROR,
                         f"Invalid model path: {model_path}. Required model files (model.bin, tokenizer.json, vocabulary.json) are missing."
                     )
@@ -146,20 +176,24 @@ class TranscriptionWorker(QRunnable):
                     self.settings.compute_type, self.settings.threads
                 )
                 if error_message:
-                    self.signals.job_status_updated.emit(JobStatus.ERROR, f"Model loading failed: {error_message}")
+                    self._report_status(JobStatus.ERROR, f"Model loading failed: {error_message}")
                     return
 
             # Ensure output directory exists
             os.makedirs(self.job.output_dir, exist_ok=True)
 
             # Calculate total audio duration for ETA
-            self.total_audio_duration = sum(task.duration for task in self.job.tasks)
+            self.total_audio_duration = sum(task.duration for task in self.job.tasks if task.status != TaskStatus.DONE)
             self._emit_eta()
 
             # Process tasks with retry and skip-on-failure
             failed_chunks = []
             chunk_offset = 0.0
             for i, task in enumerate(self.job.tasks):
+                if task.status == TaskStatus.DONE:
+                    chunk_offset += task.duration
+                    self.signals.progress_updated.emit(i, 1.0)
+                    continue
                 if self.is_canceled:
                     self._save_and_report_cancel()
                     return
@@ -170,6 +204,7 @@ class TranscriptionWorker(QRunnable):
                         return
                     time.sleep(0.1)
 
+                task.status = TaskStatus.RUNNING
                 self.signals.task_status_updated.emit(
                     i, TaskStatus.RUNNING,
                     f"Transcribing chunk {task.chunk_index + 1}/{len(self.job.tasks)} of {os.path.basename(self.job.original_file_path)}"
@@ -188,6 +223,7 @@ class TranscriptionWorker(QRunnable):
 
                     try:
                         def progress_cb(pct, _i=i):
+                            task.progress = pct / 100.0
                             self.signals.progress_updated.emit(_i, pct / 100.0)
                             self._emit_eta(task.duration * pct / 100.0)
 
@@ -198,7 +234,6 @@ class TranscriptionWorker(QRunnable):
                                 binary_path=binary_path,
                                 beam_size=beam_size,
                                 language=language,
-                                vad_filter=self.settings.vad_enabled,
                                 use_gpu=True,
                                 progress_callback=progress_cb,
                                 cancel_event=self._cancel_event,
@@ -207,8 +242,9 @@ class TranscriptionWorker(QRunnable):
                                 word_timestamps=self.settings.diarization_enabled,
                             )
                         else:
-                            text, srt_segments = self._run_cancellable(
-                                transcribe_chunk,
+                            # Stay in this worker until native inference returns.
+                            # Cancellation is observed between generated segments.
+                            text, srt_segments = transcribe_chunk(
                                 task.chunk_path, model, language, beam_size, self.settings.vad_enabled,
                                 cancel_event=self._cancel_event,
                                 word_timestamps=self.settings.diarization_enabled,
@@ -240,17 +276,14 @@ class TranscriptionWorker(QRunnable):
                                 f"after {max_retries + 1} attempts: {chunk_error}"
                             )
                             failed_chunks.append(task.chunk_index + 1)
+                            task.error_message = str(chunk_error)
 
                 if self.is_canceled:
                     if chunk_success:
                         task.text = text
                         task.srt_segments = srt_segments
                         task.status = TaskStatus.DONE
-                        base_name = self._get_base_name()
-                        save_chunk_checkpoint(
-                            self.job.output_dir, base_name, task.chunk_index,
-                            text, srt_segments, task.duration, start_offset=chunk_offset
-                        )
+                        self._save_chunk(task, chunk_offset)
                     self._save_and_report_cancel()
                     return
 
@@ -259,14 +292,10 @@ class TranscriptionWorker(QRunnable):
                     task.srt_segments = srt_segments
                     task.status = TaskStatus.DONE
 
-                    base_name = self._get_base_name()
-                    save_chunk_checkpoint(
-                        self.job.output_dir, base_name, task.chunk_index,
-                        text, srt_segments, task.duration, start_offset=chunk_offset
-                    )
+                    self._save_chunk(task, chunk_offset)
                     logging.info(f"Saved checkpoint for chunk {task.chunk_index + 1}/{len(self.job.tasks)}")
 
-                    merge_checkpoints_to_files(self.job.output_dir, base_name, output_format=self.settings.output_format)
+                    self._merge_results()
                     logging.info(f"Merged {task.chunk_index + 1} completed chunks")
 
                     self.signals.task_status_updated.emit(
@@ -275,6 +304,8 @@ class TranscriptionWorker(QRunnable):
                     )
                     self.signals.progress_updated.emit(i, 1.0)
                 else:
+                    task.status = TaskStatus.ERROR
+                    save_job(self.job)
                     self.signals.task_status_updated.emit(
                         i, TaskStatus.ERROR,
                         f"Chunk {task.chunk_index + 1}/{len(self.job.tasks)} failed, skipping"
@@ -286,59 +317,72 @@ class TranscriptionWorker(QRunnable):
                 self._emit_eta()
 
             # All chunks processed
-            cleanup_temp = True
-            base_name = self._get_base_name()
+            self._merge_results()
+            cleanup_temp = not failed_chunks
             total_time = time.time() - self.start_time
 
             if failed_chunks:
                 chunk_list = ', '.join(str(c) for c in failed_chunks)
-                msg = f"Completed with {len(failed_chunks)} failed chunk(s) (chunks {chunk_list}). Partial results saved."
-                self.signals.job_status_updated.emit(JobStatus.DONE, msg)
+                saved = "Partial results saved." if len(failed_chunks) < len(self.job.tasks) else "No results were produced."
+                msg = f"{len(failed_chunks)} chunk(s) failed (chunks {chunk_list}). {saved} You can retry this file."
+                self._report_status(JobStatus.ERROR, msg)
                 logging.warning(f"Transcription completed with errors. Failed chunks: {failed_chunks}. Total time: {total_time:.2f}s")
             else:
-                self.signals.job_status_updated.emit(JobStatus.DONE, "Job completed")
+                self._report_status(JobStatus.DONE, "Job completed")
                 logging.info(f"Transcription for {self.job.original_file_path} completed in {total_time:.2f} seconds.")
-            self._cleanup_checkpoint_files(base_name)
+            self._cleanup_checkpoint_files()
 
         except InterruptedError:
             self._save_and_report_cancel()
         except Exception as e:
             try:
-                base_name = self._get_base_name()
-                txt_path, srt_path = merge_checkpoints_to_files(self.job.output_dir, base_name, output_format=self.settings.output_format)
-                self._cleanup_checkpoint_files(base_name)
+                txt_path, srt_path = self._merge_results()
+                self._cleanup_checkpoint_files()
                 if txt_path or srt_path:
                     logging.warning(f"Job failed, but partial results saved to {txt_path or srt_path}")
-                    self.signals.job_status_updated.emit(
+                    self._report_status(
                         JobStatus.ERROR, f"Error: {str(e)}\nPartial results saved."
                     )
                 else:
-                    self.signals.job_status_updated.emit(JobStatus.ERROR, str(e))
+                    self._report_status(JobStatus.ERROR, str(e))
             except Exception as merge_error:
                 logging.error(f"Failed to save partial results: {merge_error}")
-                self.signals.job_status_updated.emit(JobStatus.ERROR, str(e))
+                self._report_status(JobStatus.ERROR, str(e))
 
             logging.error(f"Error during transcription for {self.job.original_file_path}: {e}")
         finally:
             # Only clean up temp files on success — keep them on error so user can retry
             if cleanup_temp and self.job.temp_dir and os.path.exists(self.job.temp_dir):
-                shutil.rmtree(self.job.temp_dir)
+                try:
+                    if self.job.record_path:
+                        release_audio(self.job)
+                    else:
+                        shutil.rmtree(self.job.temp_dir)
+                except (OSError, ValueError):
+                    logging.warning("Could not remove temporary audio", exc_info=True)
             self.signals.finished.emit()
 
     def _save_and_report_cancel(self):
-        base_name = self._get_base_name()
-        txt_path, srt_path = merge_checkpoints_to_files(self.job.output_dir, base_name, output_format=self.settings.output_format)
-        self._cleanup_checkpoint_files(base_name)
+        try:
+            txt_path, srt_path = self._merge_results()
+            self._cleanup_checkpoint_files()
+        except Exception as error:
+            logging.exception("Could not export canceled job; retaining checkpoints")
+            self._report_status(
+                JobStatus.ERROR, f"Canceled, but partial export failed: {error}. Checkpoints were retained.")
+            return
         if txt_path or srt_path:
-            self.signals.job_status_updated.emit(JobStatus.CANCELED, "Job canceled. Partial results saved.")
+            self._report_status(JobStatus.CANCELED, "Job canceled. Partial results saved.")
             logging.info("Transcription canceled. Partial results saved.")
         else:
-            self.signals.job_status_updated.emit(JobStatus.CANCELED, "Job canceled")
+            self._report_status(JobStatus.CANCELED, "Job canceled")
             logging.info(f"Transcription canceled for {self.job.original_file_path}")
 
-    def _cleanup_checkpoint_files(self, base_name):
+    def _cleanup_checkpoint_files(self):
+        if self.job.record_path:
+            return
         try:
-            cleanup_checkpoints(self.job.output_dir, base_name)
+            cleanup_checkpoints(self.job.output_dir, self._checkpoint_name)
         except Exception as e:
             logging.warning(f"Could not clean up checkpoint files: {e}")
 

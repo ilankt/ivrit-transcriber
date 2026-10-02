@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 
 from engine.speaker_segmentation import AcceleratedSpeechFilters, StableInstanceNorm
 

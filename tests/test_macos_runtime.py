@@ -103,7 +103,8 @@ def test_homebrew_binary_found_without_shell_path(monkeypatch):
     monkeypatch.setattr(whisper_cpp_runner.shutil, "which", lambda name: None)
     monkeypatch.setattr(whisper_cpp_runner.os.path, "isfile", lambda path: path == "/opt/homebrew/bin/whisper-cli")
     monkeypatch.setattr(whisper_cpp_runner.os, "access", lambda path, mode: True)
-    assert whisper_cpp_runner.get_whispercpp_binary_path("/app") == "/opt/homebrew/bin/whisper-cli"
+    monkeypatch.setattr(whisper_cpp_runner, "get_whispercpp_binary_error", lambda path: None)
+    assert whisper_cpp_runner.resolve_whispercpp_binary("/app") == ("/opt/homebrew/bin/whisper-cli", None)
 
 
 @pytest.mark.parametrize("name", ["ffmpeg", "ffprobe"])
@@ -118,7 +119,7 @@ def test_homebrew_media_tools_found_without_shell_path(monkeypatch, name):
 
 def test_nonzero_whisper_help_is_rejected(monkeypatch):
     monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1, stdout=b'', stderr=b'broken binary'))
-    assert not whisper_cpp_runner.validate_whispercpp_binary("broken-whisper-cli")
+    assert "broken binary" in whisper_cpp_runner.get_whispercpp_binary_error("broken-whisper-cli")
 
 
 def test_broken_bundled_binary_does_not_hide_working_homebrew(monkeypatch, tmp_path):
@@ -188,20 +189,20 @@ def test_successful_metal_help_output_is_accepted(monkeypatch):
             stderr=b'ggml_metal_device_init: GPU name: MTL0 (Apple M4 Max)\nusage: whisper-cli [options]',
         )
     monkeypatch.setattr(whisper_cpp_runner.subprocess, "run", run)
-    assert whisper_cpp_runner.validate_whispercpp_binary("/opt/homebrew/bin/whisper-cli")
+    assert whisper_cpp_runner.get_whispercpp_binary_error("/opt/homebrew/bin/whisper-cli") is None
 
 
 def test_hebrew_ggml_download_is_renamed_to_registered_path(monkeypatch, tmp_path, qt_app):
     from engine import model_downloader
     info = model_loader.get_model_download_info("he", "whisper-cpp")
     target = model_loader.resolve_model_path("he", "whisper-cpp", str(tmp_path), str(tmp_path))
-    def download(repo_id, filename, directory, *args):
+    def download(repo_id, filename, directory, progress, cancel, target_name):
         assert repo_id == "ivrit-ai/whisper-large-v3-ggml"
-        (Path(directory) / filename).write_bytes(b"test model")
+        (Path(directory) / target_name).write_bytes(b"test model")
     monkeypatch.setattr(model_downloader, "download_ggml_file", download)
     worker = ModelDownloadWorker(info, target)
     results = []
-    worker.finished.connect(lambda success, message: results.append((success, message)))
+    worker.result.connect(lambda success, message: results.append((success, message)))
     worker.run()
     assert results == [(True, "")]
     assert Path(target).read_bytes() == b"test model"
@@ -220,7 +221,8 @@ def test_ct2_auto_on_mac_never_attempts_cuda(monkeypatch):
 @pytest.mark.parametrize("gpu_available", [True, False])
 def test_metal_runner_keeps_gpu_enabled_and_reports_cpu_fallback(monkeypatch, gpu_available):
     calls = []
-    process = SimpleNamespace(returncode=0, wait=Mock(), terminate=Mock())
+    process = SimpleNamespace(returncode=0, wait=Mock(), terminate=Mock(),
+                              poll=Mock(return_value=0 if gpu_available else None))
     process.stderr = io.BytesIO(
         b"whisper_backend_init_gpu: using Metal backend\n" if gpu_available
         else b"whisper_backend_init_gpu: no GPU found\n"

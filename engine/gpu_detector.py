@@ -20,20 +20,25 @@ def detect_cuda_gpu() -> tuple[bool, str]:
         tuple[bool, str]: (is_available, info_message)
     """
     try:
-        import torch
+        import ctranslate2
 
-        if not torch.cuda.is_available():
+        if ctranslate2.get_cuda_device_count() == 0:
             return False, "No NVIDIA CUDA GPU detected"
-
-        gpu_count = torch.cuda.device_count()
-        if gpu_count == 0:
-            return False, "CUDA is available but no GPU devices found"
-
-        gpu_name = torch.cuda.get_device_name(0)
-        return True, gpu_name
+        # CTranslate2 is the transcription runtime; optional CPU-only Torch
+        # must not hide a GPU that Faster-Whisper can use.
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                capture_output=True, timeout=3, check=False, **_POPEN_EXTRA_KWARGS)
+            names = result.stdout.decode('utf-8', errors='replace').strip().splitlines()
+            if result.returncode == 0 and names:
+                return True, names[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return True, "NVIDIA CUDA"
 
     except ImportError:
-        return False, "PyTorch not installed (required for GPU detection)"
+        return False, "CTranslate2 is unavailable"
     except Exception as e:
         return False, f"GPU detection error: {str(e)}"
 
@@ -49,39 +54,37 @@ def detect_vulkan_gpu() -> tuple[bool, str]:
     """
     # Try vulkaninfo first
     try:
-        p = subprocess.Popen(
+        result = subprocess.run(
             ['vulkaninfo', '--summary'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            capture_output=True, timeout=10, check=False,
             **_POPEN_EXTRA_KWARGS
         )
-        out, _ = p.communicate(timeout=10)
-        if p.returncode == 0:
-            text = out.decode('utf-8', errors='replace')
+        if result.returncode == 0:
+            text = result.stdout.decode('utf-8', errors='replace')
             # Look for AMD device in vulkaninfo output
             for line in text.splitlines():
                 if 'deviceName' in line:
                     name = line.split('=')[-1].strip()
                     if any(kw in name.upper() for kw in ('AMD', 'RADEON')):
                         return True, name
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+    except (OSError, subprocess.TimeoutExpired):
         pass
 
     # Fallback: WMI on Windows
     if sys.platform == 'win32':
         try:
-            p = subprocess.Popen(
+            result = subprocess.run(
                 ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                capture_output=True, timeout=10, check=False,
                 **_POPEN_EXTRA_KWARGS
             )
-            out, _ = p.communicate(timeout=10)
-            if p.returncode == 0:
-                text = out.decode('utf-8', errors='replace')
+            if result.returncode == 0:
+                text = result.stdout.decode('utf-8', errors='replace')
                 for line in text.splitlines():
                     line = line.strip()
                     if any(kw in line.upper() for kw in ('AMD', 'RADEON')):
                         return True, line
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
     return False, "No AMD Vulkan GPU detected"

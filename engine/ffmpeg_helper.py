@@ -107,7 +107,9 @@ def split_audio(in_wav_path, chunk_minutes, out_dir):
             os.path.join(out_dir, f)
             for f in os.listdir(out_dir)
             if f.startswith('basename__part-') and f.endswith('.wav')
-        ])
+        ], key=lambda path: int(os.path.splitext(path)[0].rsplit('-', 1)[1]))
         return chunk_paths, None
     except ffmpeg.Error as e:
-        return None, e.stderr.decode('utf-8') if e.stderr else "Unknown FFmpeg error"
+        return None, e.stderr.decode('utf-8', errors='replace') if e.stderr else "Unknown FFmpeg error"
+    except (OSError, ValueError) as e:
+        return None, str(e)

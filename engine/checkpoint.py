@@ -5,13 +5,15 @@ Allows recovery of partial results if transcription fails or is interrupted.
 import os
 import json
 import shutil
+from core.storage import atomic_text_writer
 
 
 def _format_srt_time(seconds):
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    seconds_fraction = seconds % 60
-    return f"{hours:02}:{minutes:02}:{seconds_fraction:06.3f}".replace('.', ',')
+    milliseconds = max(0, round(seconds * 1000))
+    seconds, milliseconds = divmod(milliseconds, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
 
 def _load_segment(segment_str):
@@ -64,7 +66,7 @@ def save_chunk_checkpoint(output_dir, base_filename, chunk_index, text, srt_segm
         checkpoint_data['start_offset'] = start_offset
 
     checkpoint_path = os.path.join(checkpoint_dir, f'chunk_{chunk_index:03d}.json')
-    with open(checkpoint_path, 'w', encoding='utf-8') as f:
+    with atomic_text_writer(checkpoint_path) as f:
         json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
 
     return checkpoint_path
@@ -143,7 +145,7 @@ def merge_checkpoints_to_files(output_dir, base_filename, checkpoints=None, outp
         merged_txt_path = os.path.join(output_dir, f"{base_filename}.txt")
         merged_text = [checkpoint['text'] for checkpoint in checkpoints]
 
-        with open(merged_txt_path, 'w', encoding='utf-8') as f:
+        with atomic_text_writer(merged_txt_path) as f:
             f.write("\n".join(merged_text))
 
     # Merge SRT files
@@ -190,7 +192,7 @@ def merge_checkpoints_to_files(output_dir, base_filename, checkpoints=None, outp
                 else:
                     time_offset_seconds += checkpoint.get('duration', 60)
 
-        with open(merged_srt_path, 'w', encoding='utf-8') as f:
+        with atomic_text_writer(merged_srt_path) as f:
             f.write("\n".join(merged_srt_content))
 
     return merged_txt_path, merged_srt_path

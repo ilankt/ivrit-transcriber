@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import queue
+import threading
 
 _POPEN_EXTRA_KWARGS = {}
 if sys.platform == 'win32':
@@ -30,15 +32,6 @@ def _whispercpp_candidates(base_path: str) -> list[str]:
             for formula in ('whisper.cpp', 'whisper-cpp'):
                 candidates.append(f'{prefix}/opt/{formula}/bin/whisper-cli')
     return list(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-
-def get_whispercpp_binary_path(base_path: str) -> str | None:
-    """Find the first executable candidate without launching it."""
-    candidates = _whispercpp_candidates(base_path)
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
 
 
 def resolve_whispercpp_binary(base_path: str) -> tuple[str | None, str | None]:
@@ -92,16 +85,12 @@ def get_whispercpp_binary_error(binary_path: str) -> str | None:
         return str(exc)
 
 
-def validate_whispercpp_binary(binary_path: str) -> bool:
-    """Check if the whisper-cli binary is functional."""
-    return get_whispercpp_binary_error(binary_path) is None
-
-
 def validate_ggml_model(model_path: str) -> bool:
     """Check if a GGML model file exists and has reasonable size (>10MB)."""
-    if not os.path.isfile(model_path):
+    try:
+        return os.path.isfile(model_path) and os.path.getsize(model_path) > 10 * 1024 * 1024
+    except OSError:
         return False
-    return os.path.getsize(model_path) > 10 * 1024 * 1024
 
 
 def parse_srt_content(srt_text: str) -> list[dict]:
@@ -112,7 +101,7 @@ def parse_srt_content(srt_text: str) -> list[dict]:
         list of {"start": float, "end": float, "text": str}
     """
     segments = []
-    blocks = re.split(r'\n\n+', srt_text.strip())
+    blocks = re.split(r'\n\s*\n', srt_text.replace('\r\n', '\n').strip())
 
     for block in blocks:
         lines = block.strip().splitlines()
@@ -195,7 +184,6 @@ def transcribe_chunk_whispercpp(
     binary_path: str,
     beam_size: int = 1,
     language: str = "he",
-    vad_filter: bool = True,
     use_gpu: bool = True,
     progress_callback=None,
     cancel_event=None,
@@ -211,7 +199,6 @@ def transcribe_chunk_whispercpp(
         model_path: Path to the GGML model file
         binary_path: Path to whisper-cli binary
         beam_size: Beam size for decoding
-        vad_filter: Whether to use VAD (not directly supported, ignored)
         use_gpu: Whether to use GPU (Vulkan or Metal, depending on the binary)
         progress_callback: Optional callable(int) for progress percentage
         cancel_event: Optional threading.Event checked for cancellation
@@ -245,7 +232,11 @@ def transcribe_chunk_whispercpp(
         # Full JSON enables token timestamps without shortening the subtitles.
         args.append('--output-json-full')
 
+    process = None
+    reader = None
     try:
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Transcription canceled")
         process = subprocess.Popen(
             args,
             stdout=subprocess.DEVNULL,  # Transcript is read from files; avoid a full pipe.
@@ -257,15 +248,36 @@ def transcribe_chunk_whispercpp(
         progress_pattern = re.compile(r'progress\s*=\s*(\d+)%')
         stderr_lines = []
 
-        if process.stderr:
-            for raw_line in iter(process.stderr.readline, b''):
+        lines = queue.Queue()
+
+        def read_stderr():
+            try:
+                for raw_line in iter(process.stderr.readline, b''):
+                    lines.put(raw_line)
+            except Exception as error:
+                lines.put(error)
+            finally:
+                lines.put(None)
+
+        reader = threading.Thread(target=read_stderr, daemon=True)
+        reader.start()
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Transcription canceled")
+            try:
+                raw_line = lines.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if raw_line is None:
+                break
+            if isinstance(raw_line, Exception):
+                raise raw_line
+            if raw_line:
                 line = raw_line.decode('utf-8', errors='replace')
                 stderr_lines.append(line)
                 if 'whisper_backend_init_gpu:' in line:
                     logging.info(line.strip())
                     if require_metal and ('no GPU found' in line or 'failed to initialize' in line):
-                        process.terminate()
-                        process.wait()
                         raise RuntimeError(
                             "Metal GPU initialization failed. " + whispercpp_setup_hint()
                         )
@@ -273,12 +285,14 @@ def transcribe_chunk_whispercpp(
                     match = progress_pattern.search(line)
                     if match:
                         progress_callback(int(match.group(1)))
-                if cancel_event and cancel_event.is_set():
-                    process.terminate()
-                    process.wait()
-                    raise InterruptedError("Transcription canceled")
-
-        process.wait()
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise InterruptedError("Transcription canceled")
+            try:
+                process.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                continue
 
         stderr_text = ''.join(stderr_lines)
 
@@ -325,4 +339,16 @@ def transcribe_chunk_whispercpp(
 
         return full_text, srt_segments_json
     finally:
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if reader is not None:
+                reader.join()
+            if process.stderr is not None:
+                process.stderr.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)

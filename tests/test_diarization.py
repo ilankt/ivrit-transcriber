@@ -262,6 +262,7 @@ def test_cuda_inference_and_recovery_do_not_swallow_cancellation(tmp_path, monke
 
 
 def test_known_speakers_cannot_collapse_distinct_local_tracks():
+    pytest.importorskip("pyannote.audio")
     import numpy as np
     from pyannote.audio.pipelines.clustering import AgglomerativeClustering
     clustering = AgglomerativeClustering()

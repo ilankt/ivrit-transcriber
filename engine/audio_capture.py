@@ -9,6 +9,8 @@ falls back to sounddevice if unavailable.
 """
 import logging
 import threading
+import sys
+from collections import deque
 import numpy as np
 
 
@@ -30,6 +32,8 @@ def list_loopback_devices() -> list[dict]:
             return devices
     except ImportError:
         pass
+    except Exception:
+        logging.warning("WASAPI initialization failed; trying sounddevice", exc_info=True)
 
     # Fallback to sounddevice
     try:
@@ -89,7 +93,7 @@ def _list_devices_sounddevice(sd) -> list[dict]:
             if dev['max_input_channels'] > 0:
                 is_wasapi = (wasapi_index is not None and dev['hostapi'] == wasapi_index)
                 is_loopback = 'loopback' in dev['name'].lower()
-                if is_wasapi or is_loopback:
+                if is_wasapi or is_loopback or sys.platform != 'win32':
                     devices.append({
                         'index': i,
                         'name': dev['name'],
@@ -106,9 +110,14 @@ def _list_devices_sounddevice(sd) -> list[dict]:
 class AudioBuffer:
     """Thread-safe audio accumulator for streaming capture."""
 
-    def __init__(self, sample_rate: int, channels: int):
+    def __init__(self, sample_rate: int, channels: int, max_seconds: float = 120):
+        if sample_rate <= 0 or channels <= 0 or max_seconds <= 0:
+            raise ValueError("Audio buffer dimensions must be positive")
         self._lock = threading.Lock()
-        self._chunks: list[np.ndarray] = []
+        self._chunks = deque()
+        self._frames = 0
+        self._max_frames = min(int(sample_rate * max_seconds), 64 * 1024 * 1024 // (channels * 4))
+        self._overflowed = False
         self._sample_rate = sample_rate
         self._channels = channels
         self._peak = 0.0
@@ -123,19 +132,38 @@ class AudioBuffer:
 
     def write(self, data: np.ndarray):
         """Append audio chunk from callback. Must be fast."""
+        if not data.size:
+            return True
         with self._lock:
-            self._chunks.append(data.copy())
+            if self._overflowed:
+                return False
+            available = self._max_frames - self._frames
+            self._overflowed = len(data) > available
+            accepted = data[:available]
+            if len(accepted):
+                self._chunks.append(accepted.astype(np.float32, copy=True))
+                self._frames += len(accepted)
             # Update peak level for VU meter
             peak = float(np.max(np.abs(data)))
             self._peak = max(self._peak, peak)
+            return not self._overflowed
 
-    def read_and_clear(self) -> np.ndarray | None:
-        """Extract all accumulated audio and reset buffer. Returns None if empty."""
+    def read_and_clear(self, max_seconds=None) -> np.ndarray | None:
+        """Read oldest audio, optionally limiting a batch; preserve its time order."""
         with self._lock:
             if not self._chunks:
                 return None
-            audio = np.concatenate(self._chunks, axis=0)
-            self._chunks.clear()
+            count = self._frames if max_seconds is None else min(self._frames, max(1, int(max_seconds * self._sample_rate)))
+            pieces = []
+            while count:
+                chunk = self._chunks.popleft()
+                taken = min(count, len(chunk))
+                pieces.append(chunk[:taken])
+                if taken < len(chunk):
+                    self._chunks.appendleft(chunk[taken:])
+                self._frames -= taken
+                count -= taken
+            audio = np.concatenate(pieces, axis=0)
             self._peak = 0.0
             return audio
 
@@ -143,10 +171,12 @@ class AudioBuffer:
     def duration_seconds(self) -> float:
         """Current buffer duration in seconds."""
         with self._lock:
-            if not self._chunks:
-                return 0.0
-            total_samples = sum(chunk.shape[0] for chunk in self._chunks)
-            return total_samples / self._sample_rate
+            return self._frames / self._sample_rate
+
+    @property
+    def overflowed(self):
+        with self._lock:
+            return self._overflowed
 
     @property
     def peak_level(self) -> float:
@@ -166,6 +196,10 @@ def resample_to_16k_mono(audio: np.ndarray, source_rate: int) -> np.ndarray:
     Returns:
         float32 numpy array at 16000 Hz, mono
     """
+    if source_rate <= 0:
+        raise ValueError("Audio sample rate must be positive")
+    if not audio.size:
+        return np.array([], dtype=np.float32)
     # Convert to float32 if needed
     if audio.dtype != np.float32:
         if np.issubdtype(audio.dtype, np.integer):

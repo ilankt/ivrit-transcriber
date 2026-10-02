@@ -39,7 +39,7 @@ def qt_app():
 def load_file(path):
     jobs, errors, info = [], [], []
     worker = FileLoadWorker(str(path))
-    worker.finished.connect(jobs.append, Qt.ConnectionType.DirectConnection)
+    worker.loaded.connect(jobs.append, Qt.ConnectionType.DirectConnection)
     worker.error.connect(errors.append, Qt.ConnectionType.DirectConnection)
     worker.file_info_ready.connect(
         lambda duration, video: info.append((duration, video)),
@@ -106,7 +106,9 @@ def test_chunks_preserve_all_samples_across_minute_boundary(tmp_path, qt_app):
     job = jobs[0]
     try:
         assert len(job.tasks) == 2
-        original = read_pcm(os.path.join(job.temp_dir, "audio.wav"))
+        reference = tmp_path / "reference.wav"
+        assert extract_audio(str(source), str(reference)) is None
+        original = read_pcm(reference)
         joined = np.concatenate([read_pcm(task.chunk_path) for task in job.tasks])
         np.testing.assert_array_equal(joined, original)
         assert sum(task.duration for task in job.tasks) == pytest.approx(len(original) / 16000, abs=0.001)

@@ -16,6 +16,10 @@ A desktop application for transcribing Hebrew and English audio and video files 
 - Voice Activity Detection (VAD)
 - Step-by-step progress, completion percentages, and estimated time remaining
 - Custom output filenames
+- Persistent job history, resume after restart, and retries that keep completed chunks
+- A batch queue with independent file status and distinct output names
+- Transcript review with audio playback, text/timing corrections, speaker renaming, and re-export
+- Verified Hebrew/English model downloads and repair
 
 The latest source version includes GPU-assisted speaker detection and improved
 two-speaker separation. On Windows, launch **Run Ivrit Transcriber.cmd**; use
@@ -138,7 +142,7 @@ Turning speaker detection off uses the regular transcription workflow.
 - Python 3.11+
 - [FFmpeg](https://ffmpeg.org/download.html) installed and available in PATH
 - Hebrew Whisper models (see [Models](#models) below)
-- Optional: PyTorch with CUDA for NVIDIA GPU acceleration
+- Optional: NVIDIA drivers and the CUDA libraries required by Faster-Whisper for NVIDIA transcription; PyTorch is needed only for speaker detection
 - Optional: whisper.cpp with Vulkan for AMD GPU acceleration (see [AMD GPU Setup](#amd-gpu-setup))
 
 ## Installation
@@ -150,8 +154,17 @@ git clone https://github.com/ilankt/ivrit-transcriber.git
 cd ivrit-transcriber
 python -m venv .venv
 .venv\Scripts\activate     # Windows
-pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt
+python app.py
 ```
+
+`requirements-lock.txt` pins the complete core runtime for Python 3.11/3.12 on
+Windows and Apple Silicon. `requirements.txt` remains the flexible dependency
+list. For the tested Windows speaker runtime, use Python 3.12 with
+`requirements-speakers-lock.txt` **instead of** the core lock, then run
+`python scripts/setup_speaker_acceleration.py`. The Windows launcher uses that
+speaker snapshot during setup. Other platforms can install the flexible core
+and speaker requirements as described above.
 
 ## Models
 
@@ -159,14 +172,22 @@ The app uses the standard large-v3 Whisper model for transcription. Which format
 
 ### For CPU or NVIDIA GPU (CTranslate2 format)
 
-Download and place in `Models/`:
+Select the language and **CPU Only** or **NVIDIA GPU** in Settings, then use
+**Download**. Hebrew uses [ivrit.ai's CTranslate2 model](https://huggingface.co/ivrit-ai/whisper-large-v3-ct2)
+and English uses Systran's Faster-Whisper large-v3 model. Manual placement is also supported:
 
 ```
 Models/
   ivrit-large-v3-ct2/
 ```
 
-Each folder must contain: `model.bin`, `tokenizer.json`, `vocabulary.json`.
+Each folder must contain: `config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json`.
+
+**Verify / Repair** checks the selected model against its repository's file hashes,
+downloads damaged/missing files into a staging directory, then replaces verified
+files. All files in a download use one fixed repository revision. Verification
+needs internet access; normal transcription remains local and offline. Canceled
+or incomplete CTranslate2 updates must be repaired before use.
 
 ### For AMD GPU (GGML format)
 
@@ -231,7 +252,7 @@ git clone https://github.com/ilankt/ivrit-transcriber.git
 cd ivrit-transcriber
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt
 python app.py
 ```
 
@@ -252,8 +273,8 @@ Faster-Whisper on the CPU on Macs; system-audio capture requires an input device
 provided by an audio loopback driver.
 
 For an Intel Mac, install FFmpeg and Python, use the same source installation
-steps, and select **CPU Only**. Supply the Hebrew CTranslate2 model described
-above, or select English and download its model in Settings.
+steps (use the flexible `requirements.txt` if pinned wheels are unavailable),
+and select **CPU Only**. Download the Hebrew or English model in Settings.
 
 ## Usage
 
@@ -269,6 +290,33 @@ python app.py
 
 The device dropdown auto-detects available GPUs. Select **Auto** to let the app choose the best option.
 
+### Jobs, batches, and review
+
+Open **Jobs & Review** to see jobs created by this version of the app. **Add Files**
+adds multiple files, asks for an output directory, and captures the current
+settings. **Run Queue** processes queued files sequentially and continues after a
+file fails. **Stop Queue** cancels current inference at its next safe boundary;
+file preparation finishes before stopping. Remaining files stay queued.
+
+Select an interrupted or failed job and use **Resume / Retry Selected**. Completed
+chunks and speaker detection results are retained, including across app restarts.
+Jobs keep their original settings to avoid mixing languages or processing options.
+To use different settings, add the file as a new job. Existing transcripts are
+preserved when batch input names collide.
+
+Job records and prepared audio are stored locally beside settings, under
+`%APPDATA%/IvritTranscriber/jobs` on Windows or `~/.ivrit_transcriber/jobs` on macOS.
+Prepared audio is removed after successful completion. **Release Selected Audio
+Cache** frees retained audio; resuming afterward requires the unchanged original
+file. Transcript history remains on disk until its job directory is removed.
+These local records contain transcript text and file paths; they are not uploaded.
+
+**Review Transcript** opens completed or partial results. Select a row to seek in
+the original media, use Play / Pause, correct text or timestamps, and rename
+speakers. **Save Corrections** stores edits separately from the ASR results;
+**Export Corrected** writes SRT or TXT. Later completed chunks are added without
+discarding existing edits. Audio playback needs the original media file.
+
 ### Live Transcription
 
 1. Switch to the **Live Transcription** tab
@@ -277,9 +325,42 @@ The device dropdown auto-detects available GPUs. Select **Auto** to let the app 
 4. Play audio (YouTube, Zoom, etc.) — words appear in real-time as streaming captions
 5. Click **Stop** to end the session and save the transcript
 
-Live transcription uses faster-whisper on CPU for low-latency response, with 1-second audio overlap between buffers and context prompting for accuracy.
+Live transcription uses Faster-Whisper on CPU by default, or CUDA when NVIDIA
+is explicitly selected, with half-second audio overlap and context prompting.
+Word timestamps reconcile repeated boundary words and preserve speech timing in
+SRT cues. The **Audio queued** indicator shows the processing backlog. Audio is
+processed in batches of at most 10 seconds (plus overlap); the capture buffer is
+capped at 120 seconds or 64 MB, whichever is smaller. If capture overflows or the
+driver reports a discontinuity, recording stops visibly and accepted audio is
+processed. A slower model/device can still require time to drain after Stop.
+
+Stopping a live session finishes the current buffer and saves the remaining audio.
+If saving fails, the transcript stays available through **Save Session...**, which
+lets you choose another folder. Live SRT timestamps are relative to the start of
+capture, while the on-screen captions show wall-clock time.
+
+Canceling file transcription saves completed chunks. Faster-Whisper cancellation
+takes effect at an inference boundary; pausing file transcription takes effect
+between chunks. Model-download cancellation waits for the current file to finish.
+Closing the app waits for active workers and saves live output before exiting.
+Failed file chunks are reported as errors, and prepared audio remains available
+for a later resume, including after restarting the app.
+
+Speaker preprocessing uses a disk-backed float32 waveform, reading at most ten
+seconds of PCM at a time. It needs about 230 MB of temporary disk per recording
+hour. This removes whole-recording copies from preprocessing RAM; model inference
+and clustering still need working memory.
+
+Source runs write logs under the project `logs/` folder. Packaged runs write logs
+beside the user settings file (on Windows, `%APPDATA%/IvritTranscriber/logs/`).
+
+The VAD setting applies to live transcription and Faster-Whisper file transcription.
+It does not apply to the whisper.cpp path used for AMD/Metal file transcription.
 
 ## Building an Executable
+
+Executable packaging is currently lower priority; the workflows above are
+validated from Python. The optional speaker distribution has not been rebuilt.
 
 ```bash
 pip install pyinstaller
@@ -308,11 +389,15 @@ core/
   filenames.py              # Shared output filename sanitizing
   settings.py               # Settings persistence (Pydantic)
   jobs.py                   # Job/Task state dataclasses
+  job_store.py              # Durable local history and audio cache ownership
+  transcript.py             # Corrections and transcript export
   runtime.py                # Runtime path and engine selection helpers
   worker.py                 # Transcription worker (QRunnable)
   live_worker.py            # Live transcription worker (QThread)
 engine/
   audio_capture.py           # WASAPI loopback device enumeration and buffering
+  live_timestamps.py         # Overlap reconciliation and timed subtitle cues
+  mapped_audio.py            # Disk-backed speaker audio
   checkpoint.py              # Progressive save and final SRT/TXT merge support
   ffmpeg_helper.py           # FFmpeg wrapper (probe, extract, split)
   model_loader.py            # Model registry, validation, downloads, and loading
@@ -322,7 +407,32 @@ engine/
 ui/
   live_panel.py              # Live transcription UI panel
   settings_panel.py          # Settings UI panel (theme, model, device)
+  job_library.py             # Batch queue, resume, and history UI
+  transcript_editor.py       # Playback, corrections, and re-export
 ```
+
+## Development checks
+
+```powershell
+python -m pip install -r requirements-test.txt
+python -m pytest -q
+python app.py --smoke-test-report logs/source-smoke-report.json
+```
+
+GitHub Actions checks the pinned core runtime on Windows and macOS with Python
+3.11/3.12, plus the Windows speaker dependency snapshot. Hardware inference is
+opt-in and is not implied by a passing hosted CI run. To repeat native checks:
+
+```powershell
+python scripts/hardware_smoke.py --loopback --report logs/loopback-smoke.json
+python scripts/hardware_smoke.py --media build/speaker-sample/conversation.wav --device amd
+python scripts/hardware_smoke.py --media build/speaker-sample/turn-0.wav --live-fixture
+python scripts/test_speaker_models.py --backend app --device amd --require-gpu
+```
+
+The loopback check plays a quiet two-second tone and does not save captured audio.
+The file/speaker checks require a synthetic fixture already generated locally;
+do not substitute private recordings in CI. See [review and validation notes](docs/code-review.md).
 
 ## License
 

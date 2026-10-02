@@ -2,12 +2,15 @@ import os
 import sys
 from faster_whisper import WhisperModel
 
-_CT2_REQUIRED_FILES = ("model.bin", "tokenizer.json", "vocabulary.json")
+_CT2_REQUIRED_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.json")
 
 _MODEL_REGISTRY = {
     ("he", "faster-whisper"): {
         "path": ("Models", "ivrit-large-v3-ct2"),
-        "repo_id": None,
+        "repo_id": "ivrit-ai/whisper-large-v3-ct2",
+        "type": "ct2",
+        "size_label": "~3 GB",
+        "required_gb": 3.5,
     },
     ("he", "whisper-cpp"): {
         "path": ("Models", "ggml-ivrit-large-v3.bin"),
@@ -89,7 +92,14 @@ def is_model_available(model_path: str, engine: str) -> bool:
 
 
 def validate_model_path(path: str) -> bool:
-    return all(os.path.exists(os.path.join(path, file)) for file in _CT2_REQUIRED_FILES)
+    try:
+        if os.path.exists(os.path.join(path, ".ivrit-incomplete")):
+            return False
+        return all(os.path.isfile(os.path.join(path, file))
+                   and os.path.getsize(os.path.join(path, file)) > 0
+                   for file in _CT2_REQUIRED_FILES)
+    except OSError:
+        return False
 
 
 def load_whisper_model(model_path: str, device: str, compute_type: str, threads: int):

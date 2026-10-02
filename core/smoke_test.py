@@ -44,7 +44,7 @@ def schedule_smoke_test(app, window, file_load_worker, report_path):
                     subprocess.run(args, check=True, capture_output=True, timeout=15, **_POPEN_EXTRA_KWARGS)
                     jobs, errors = [], []
                     worker = file_load_worker(source)
-                    worker.finished.connect(jobs.append)
+                    worker.loaded.connect(jobs.append)
                     worker.error.connect(errors.append)
                     worker.run()
                     try:

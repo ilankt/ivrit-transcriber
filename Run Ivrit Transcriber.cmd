@@ -11,7 +11,7 @@ goto run
 :setup
 "build\ivrit-speaker-env\Scripts\python.exe" -m ensurepip --upgrade
 if errorlevel 1 goto failed
-"build\ivrit-speaker-env\Scripts\python.exe" -m pip install -r requirements.txt -r requirements-speakers.txt
+"build\ivrit-speaker-env\Scripts\python.exe" -m pip install -r requirements-speakers-lock.txt
 if errorlevel 1 goto failed
 "build\ivrit-speaker-env\Scripts\python.exe" scripts\setup_speaker_acceleration.py
 if errorlevel 1 goto failed

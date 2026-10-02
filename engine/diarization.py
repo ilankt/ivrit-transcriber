@@ -5,7 +5,6 @@ import logging
 import os
 from pathlib import Path
 import sys
-import wave
 
 MODEL_REPO = "ivrit-ai/pyannote-speaker-diarization-3.1"
 MODEL_FOLDER = "ivrit-pyannote-speaker-diarization-3.1"
@@ -162,7 +161,6 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
         status_callback("Loading speaker model...")
     # This feature is local-only, including pyannote's optional usage telemetry.
     os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
-    import numpy as np
     import torch
 
     checkpoint()
@@ -202,72 +200,65 @@ def diarize_chunks(chunk_paths, path, device="auto", num_speakers=0,
             except Exception:
                 logging.exception("Speech filter GPU setup unavailable; keeping speech detection on CPU")
         checkpoint()
-        pieces = []
-        for chunk_path in chunk_paths:
-            checkpoint()
-            with wave.open(chunk_path, "rb") as audio:
-                if (audio.getframerate(), audio.getnchannels(), audio.getsampwidth()) != (16000, 1, 2):
-                    raise ValueError("Speaker detection requires 16 kHz mono PCM audio.")
-                pieces.append(np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2"))
-        waveform = np.concatenate(pieces).astype(np.float32) / 32768.0
-        del pieces
-        last_status = [None]
+        from engine.mapped_audio import mapped_audio
+        with mapped_audio(chunk_paths, checkpoint) as waveform:
+            last_status = [None]
 
-        def hook(step_name, step_artifact, file=None, total=None, completed=None):
-            checkpoint()
-            if progress_callback and step_name in ("segmentation", "embeddings") and total:
-                stage_number = 1 if step_name == "segmentation" else 2
-                progress_callback(*progress.update(stage_number, completed or 0, total))
-            elif progress_callback and step_name == "discrete_diarization":
-                progress_callback(100, "Step 2/3 — 100% of voice comparison — Finalizing speaker labels…")
-            stage = {"segmentation": "finding speech", "speaker_counting": "counting voices",
-                     "embeddings": "comparing voices", "discrete_diarization": "assigning speakers"}.get(step_name, step_name)
-            active_adapter = segmentation_accelerator if step_name == "segmentation" else accelerator
-            on_gpu = (backend == "cuda" and step_name in ("segmentation", "embeddings")) or (
-                step_name in ("segmentation", "embeddings") and active_adapter is not None and active_adapter.accelerated)
-            gpu_name = {"cuda": "CUDA", "mps": "Metal", "directml": "DirectML"}.get(backend)
-            processing_device = f"GPU ({gpu_name})" if on_gpu else "CPU"
-            if on_gpu and step_name == "segmentation" and backend != "cuda":
-                processing_device = f"GPU + CPU ({gpu_name})"
-            unavailable = (step_name in ("segmentation", "embeddings") and backend in ("mps", "directml")
-                           and (active_adapter is None or not active_adapter.accelerated))
-            if gpu_unavailable or unavailable:
-                processing_device = "CPU; GPU acceleration unavailable"
-            message = f"Detecting speakers: {stage} — {processing_device}"
-            if status_callback and message != last_status[0]:
-                status_callback(message)
-                last_status[0] = message
+            def hook(step_name, step_artifact, file=None, total=None, completed=None):
+                checkpoint()
+                if progress_callback and step_name in ("segmentation", "embeddings") and total:
+                    stage_number = 1 if step_name == "segmentation" else 2
+                    progress_callback(*progress.update(stage_number, completed or 0, total))
+                elif progress_callback and step_name == "discrete_diarization":
+                    progress_callback(100, "Step 2/3 — 100% of voice comparison — Finalizing speaker labels…")
+                stage = {"segmentation": "finding speech", "speaker_counting": "counting voices",
+                         "embeddings": "comparing voices", "discrete_diarization": "assigning speakers"}.get(step_name, step_name)
+                active_adapter = segmentation_accelerator if step_name == "segmentation" else accelerator
+                on_gpu = (backend == "cuda" and step_name in ("segmentation", "embeddings")) or (
+                    step_name in ("segmentation", "embeddings") and active_adapter is not None and active_adapter.accelerated)
+                gpu_name = {"cuda": "CUDA", "mps": "Metal", "directml": "DirectML"}.get(backend)
+                processing_device = f"GPU ({gpu_name})" if on_gpu else "CPU"
+                if on_gpu and step_name == "segmentation" and backend != "cuda":
+                    processing_device = f"GPU + CPU ({gpu_name})"
+                unavailable = (step_name in ("segmentation", "embeddings") and backend in ("mps", "directml")
+                               and (active_adapter is None or not active_adapter.accelerated))
+                if gpu_unavailable or unavailable:
+                    processing_device = "CPU; GPU acceleration unavailable"
+                message = f"Detecting speakers: {stage} — {processing_device}"
+                if status_callback and message != last_status[0]:
+                    status_callback(message)
+                    last_status[0] = message
 
-        kwargs = {"num_speakers": num_speakers} if num_speakers > 0 else {}
-        _configure_speaker_assignment(pipeline, num_speakers)
-        with torch.inference_mode():
-            audio_input = {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": 16000}
-            try:
-                result = pipeline(audio_input, hook=hook, **kwargs)
-            except (RuntimeError, NotImplementedError):
-                if backend != "cuda":
-                    raise
-                logging.exception("CUDA speaker inference failed; retrying on CPU")
-                checkpoint()  # Do not restart if the user canceled during GPU execution.
-                backend = "cpu"
-                gpu_unavailable = True
-                if status_callback:
-                    status_callback("Speaker GPU failed; retrying speaker detection on CPU...")
-                pipeline = _load_pipeline(path)
-                _configure_speaker_assignment(pipeline, num_speakers)
-                result = pipeline(audio_input, hook=hook, **kwargs)
-        checkpoint()
-        annotation = result
-        turns = sorted((float(turn.start), float(turn.end), speaker)
-                       for turn, _, speaker in annotation.itertracks(yield_label=True))
-        labels = {}
-        normalized = []
-        for start, end, speaker in turns:
-            if end <= start:
-                continue
-            labels.setdefault(speaker, f"Speaker {len(labels) + 1}")
-            normalized.append((start, end, labels[speaker]))
-        return normalized
+            kwargs = {"num_speakers": num_speakers} if num_speakers > 0 else {}
+            _configure_speaker_assignment(pipeline, num_speakers)
+            with torch.inference_mode():
+                audio_input = {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": 16000}
+                try:
+                    result = pipeline(audio_input, hook=hook, **kwargs)
+                except (RuntimeError, NotImplementedError):
+                    if backend != "cuda":
+                        raise
+                    logging.exception("CUDA speaker inference failed; retrying on CPU")
+                    checkpoint()  # Do not restart if the user canceled during GPU execution.
+                    backend = "cpu"
+                    gpu_unavailable = True
+                    if status_callback:
+                        status_callback("Speaker GPU failed; retrying speaker detection on CPU...")
+                    pipeline = _load_pipeline(path)
+                    _configure_speaker_assignment(pipeline, num_speakers)
+                    result = pipeline(audio_input, hook=hook, **kwargs)
+            checkpoint()
+            annotation = result
+            turns = sorted((float(turn.start), float(turn.end), speaker)
+                           for turn, _, speaker in annotation.itertracks(yield_label=True))
+            labels = {}
+            normalized = []
+            for start, end, speaker in turns:
+                if end <= start:
+                    continue
+                labels.setdefault(speaker, f"Speaker {len(labels) + 1}")
+                normalized.append((start, end, labels[speaker]))
+            return normalized
     finally:
         del pipeline
         del accelerator

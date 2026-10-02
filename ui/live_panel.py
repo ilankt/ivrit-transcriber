@@ -5,6 +5,10 @@ Provides the UI for real-time audio capture and transcription from
 system audio (WASAPI loopback), with word-by-word streaming display.
 """
 import os
+import logging
+import tempfile
+import sys
+from collections import deque
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
@@ -24,19 +28,22 @@ class LiveTranscriptionPanel(QWidget):
     """Panel for live audio transcription from system audio loopback."""
 
     model_download_needed = Signal()  # model missing; MainWindow should download then call _start_session
+    session_starting = Signal()
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self.can_start = lambda: True
         self._worker: LiveTranscriptionWorker | None = None
         self._session_timer = QTimer(self)
         self._session_timer.setInterval(1000)
         self._session_timer.timeout.connect(self._update_elapsed_time)
         self._session_start_time = None
         self._devices: list[dict] = []
+        self._pending_save = None
 
         # Word-by-word streaming state
-        self._word_queue: list[tuple[str | None, str]] = []  # (timestamp_or_None, word)
+        self._word_queue = deque()  # (timestamp_or_None, word)
         self._word_timer = QTimer(self)
         self._word_timer.timeout.connect(self._display_next_word)
 
@@ -85,15 +92,22 @@ class LiveTranscriptionPanel(QWidget):
         self.elapsed_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
 
         self.status_label = QLabel("Ready")
+        self.backlog_label = QLabel("Audio queued: 0 s")
+        self.backlog_label.setToolTip("Audio memory is capped at 120 seconds or 64 MB. Capture stops if processing cannot keep up.")
 
         session_layout.addWidget(self.start_button)
         session_layout.addWidget(self.stop_button)
+        self.save_button = QPushButton("Save Session...")
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self._retry_save)
+        session_layout.addWidget(self.save_button)
         session_layout.addWidget(self.elapsed_label)
         session_layout.addStretch()
         session_layout.addWidget(self.status_label)
 
         session_group.setLayout(session_layout)
         layout.addWidget(session_group)
+        layout.addWidget(self.backlog_label)
 
         # --- Live Transcript ---
         transcript_group = QGroupBox("Live Transcript")
@@ -142,7 +156,8 @@ class LiveTranscriptionPanel(QWidget):
         self._devices = list_loopback_devices()
 
         if not self._devices:
-            self.device_combo.addItem("No loopback devices found — install pyaudiowpatch", None)
+            hint = "install pyaudiowpatch" if sys.platform == 'win32' else "configure an audio loopback input"
+            self.device_combo.addItem(f"No audio devices found — {hint}", None)
             self.start_button.setEnabled(False)
         else:
             for dev in self._devices:
@@ -176,7 +191,16 @@ class LiveTranscriptionPanel(QWidget):
             self.output_folder_edit.setText(dir_path)
 
     def _start_session(self):
+        if not self.can_start():
+            self.status_label.setText("Finish active file jobs or downloads before starting live capture.")
+            return
         """Validate inputs and start live transcription."""
+        if self._worker is not None:
+            return
+        if self._pending_save is not None:
+            QMessageBox.warning(self, "Unsaved Session", "Use Save Session to save the previous transcript first.")
+            return
+        self.session_starting.emit()
         idx = self.device_combo.currentIndex()
         device_data = self.device_combo.currentData()
         if device_data is None:
@@ -188,7 +212,13 @@ class LiveTranscriptionPanel(QWidget):
             QMessageBox.warning(self, "No Output Folder", "Please select an output folder.")
             return
 
-        os.makedirs(output_folder, exist_ok=True)
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+            with tempfile.TemporaryFile(dir=output_folder) as probe:
+                probe.write(b'test')
+        except OSError as error:
+            QMessageBox.warning(self, "Output Folder", f"Cannot write to this folder:\n{error}")
+            return
 
         # Check that the model is present before starting (live always uses faster-whisper)
         from engine.model_loader import (
@@ -233,10 +263,14 @@ class LiveTranscriptionPanel(QWidget):
             backend=dev.get('backend', 'sounddevice'),
         )
         self._worker.words_ready.connect(self._on_words_ready)
+        self._worker.backlog_updated.connect(lambda seconds: self.backlog_label.setText(f"Audio queued: {seconds:.1f} s"))
         self._worker.audio_level.connect(self._on_audio_level)
         self._worker.status_updated.connect(self._on_status)
         self._worker.error_occurred.connect(self._on_error)
-        self._worker.session_finished.connect(self._on_session_finished)
+        self._worker.finished.connect(self._on_session_finished)
+
+        direction = Qt.RightToLeft if self.settings.language == "he" else Qt.LeftToRight
+        self.transcript_edit.setLayoutDirection(direction)
 
         self._worker.start()
 
@@ -251,6 +285,18 @@ class LiveTranscriptionPanel(QWidget):
 
         self._session_start_time = datetime.now()
         self._session_timer.start()
+
+    @property
+    def is_busy(self):
+        return self._worker is not None
+
+    @property
+    def has_unsaved_session(self):
+        return self._pending_save is not None
+
+    def discard_unsaved_session(self):
+        self._pending_save = None
+        self.save_button.setEnabled(False)
 
     def stop_session(self):
         """Stop the current live transcription session."""
@@ -289,7 +335,7 @@ class LiveTranscriptionPanel(QWidget):
             self._word_timer.stop()
             return
 
-        timestamp, word = self._word_queue.pop(0)
+        timestamp, word = self._word_queue.popleft()
 
         cursor = self.transcript_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -336,10 +382,6 @@ class LiveTranscriptionPanel(QWidget):
         self._word_timer.stop()
         self._flush_word_queue()
 
-        # Wait for the worker thread to actually finish before cleanup
-        if self._worker is not None:
-            self._worker.wait(5000)
-
         # Save output files
         if self._worker and self._worker.session_segments:
             output_folder = self.output_folder_edit.text()
@@ -350,16 +392,14 @@ class LiveTranscriptionPanel(QWidget):
             if not session_name:
                 session_name = f"meeting-{self._session_start_time.strftime('%Y-%m-%d-%H%M%S')}"
 
-            output_format = self.settings.output_format
-            save_live_session(
-                self._worker.session_segments,
-                output_folder, session_name, output_format
-            )
-            self.status_label.setText(f"Saved: {session_name}")
+            self._pending_save = (self._worker.session_segments, session_name, self._worker.settings.output_format)
+            self._save_pending(output_folder)
         else:
             self.status_label.setText("Session ended (no segments)")
 
-        self._worker = None
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
         self._word_queue.clear()
 
         # Reset UI state
@@ -372,8 +412,33 @@ class LiveTranscriptionPanel(QWidget):
         self.session_name_edit.setEnabled(True)
         self.vu_meter.setValue(0)
 
+    def _save_pending(self, output_folder):
+        segments, name, output_format = self._pending_save
+        try:
+            save_live_session(segments, output_folder, name, output_format)
+        except OSError as error:
+            logging.exception("Could not save live transcript")
+            self.save_button.setEnabled(True)
+            self.status_label.setText("Save failed; use Save Session to choose another folder.")
+            QMessageBox.warning(self, "Save Failed", f"The transcript is still available.\n{error}")
+            return False
+        self._pending_save = None
+        self.save_button.setEnabled(False)
+        self.status_label.setText(f"Saved: {name}")
+        return True
+
+    def _retry_save(self):
+        if self._pending_save is not None:
+            folder = QFileDialog.getExistingDirectory(self, "Save Session")
+            if folder:
+                self._save_pending(folder)
+
     def _update_elapsed_time(self):
         """Update the elapsed time label every second."""
+        if self._worker is not None:
+            self.backlog_label.setText(f"Audio queued: {self._worker.queued_seconds:.1f} s")
+            if self._worker.capture_warning:
+                self.status_label.setText("Capture stopped; processing accepted audio…")
         if self._session_start_time is None:
             return
         elapsed = (datetime.now() - self._session_start_time).total_seconds()

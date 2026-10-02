@@ -4,7 +4,7 @@ faster-whisper
 av>=11,<19
 ffmpeg-python
 tqdm
-pydantic
+pydantic>=2,<3
 huggingface_hub
 pyaudiowpatch; sys_platform == "win32"
 sounddevice

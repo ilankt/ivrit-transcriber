@@ -250,6 +250,12 @@ class SettingsPanel(QWidget):
         device = self.device_combo.currentData() or "auto"
         # Use the same backend as the worker without repeating hardware detection.
         engine = determine_engine(device, self.gpu_info)
+        self.vad_checkbox.setText(
+            "Enable VAD (live transcription only)" if engine == "whisper-cpp"
+            else "Enable VAD (Voice Activity Detection)")
+        self.vad_checkbox.setToolTip(
+            "Voice filtering applies to live sessions and CPU/NVIDIA file transcription. "
+            "AMD/Metal file transcription does not use this filter.")
 
         models_dir = self.models_folder_edit.text().strip() or None
         model_path = resolve_model_path(language, engine, get_base_path(), models_dir)
@@ -259,7 +265,8 @@ class SettingsPanel(QWidget):
         if is_model_available(model_path, engine):
             self.model_status_label.setText("Ready ✓")
             self.model_status_label.setStyleSheet("color: green;")
-            self.download_button.setVisible(False)
+            self.download_button.setText("Verify / Repair")
+            self.download_button.setVisible(bool(download_info))
         elif download_info:
             size = get_download_size_label(download_info)
             lang_label = "English" if language == "en" else "Hebrew"
@@ -365,11 +372,8 @@ class SettingsPanel(QWidget):
 
         def _on_rmtree_error(func, path, exc_info):
             # HuggingFace Hub marks cached files read-only; clear the flag and retry.
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except Exception:
-                pass
+            os.chmod(path, stat.S_IWRITE)
+            func(path)  # Propagate a failed retry so the UI cannot report false success.
 
         errors = []
         deleted = 0

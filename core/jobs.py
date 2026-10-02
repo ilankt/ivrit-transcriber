@@ -39,6 +39,11 @@ class Job:
     error_message: str | None = None
     custom_output_filename: str | None = None
     temp_dir: str | None = None
+    record_path: str | None = None
+    settings_snapshot: dict | None = None
+    source_signature: dict | None = None
+    speaker_turns: list | None = None
+    created_at: str = ""
 
     def update_progress(self):
         if not self.tasks:

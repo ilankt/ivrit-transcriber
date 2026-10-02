@@ -77,7 +77,7 @@ def test_runner_requests_and_preserves_word_timings_with_srt_recovery(monkeypatc
             "1\n00:00:00,000 --> 00:00:05,000\nHello there. Good morning.\n", encoding="utf-8")
         if enabled:
             Path(prefix + ".json").write_text(json.dumps(conversation()) if valid_json else "{", encoding="utf-8")
-        return SimpleNamespace(stderr=io.BytesIO(), returncode=0, wait=Mock())
+        return SimpleNamespace(stderr=io.BytesIO(), returncode=0, wait=Mock(), poll=Mock(return_value=0))
     monkeypatch.setattr(runner.subprocess, "Popen", popen)
     text, encoded = runner.transcribe_chunk_whispercpp("synthetic.wav", "model", "cli", word_timestamps=enabled)
     result = json.loads(encoded[0])
