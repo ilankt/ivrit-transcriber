@@ -10,7 +10,7 @@ import stat
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QFormLayout,
     QComboBox, QCheckBox, QLabel, QPushButton, QLineEdit,
-    QHBoxLayout, QFileDialog, QMessageBox,
+    QHBoxLayout, QFileDialog, QMessageBox, QSpinBox,
 )
 from PySide6.QtCore import Signal
 from core.runtime import get_base_path, determine_engine
@@ -69,6 +69,23 @@ class SettingsPanel(QWidget):
         self.vad_checkbox = QCheckBox("Enable VAD (Voice Activity Detection)")
         self.vad_checkbox.setChecked(True)
         transcription_layout.addRow(self.vad_checkbox)
+
+        self.diarization_checkbox = QCheckBox("Detect speakers (recorded files only)")
+        transcription_layout.addRow(self.diarization_checkbox)
+        speaker_row = QHBoxLayout()
+        self.speaker_count = QSpinBox()
+        self.speaker_count.setRange(0, 50)
+        self.speaker_count.setSpecialValueText("Auto")
+        self.speaker_count.setToolTip("Leave on Auto, or set the known number of speakers.")
+        self.speaker_setup_button = QPushButton("Set Up Speakers...")
+        self.speaker_setup_button.clicked.connect(self._setup_speakers)
+        speaker_row.addWidget(self.speaker_count)
+        speaker_row.addWidget(self.speaker_setup_button)
+        transcription_layout.addRow("Speakers:", speaker_row)
+        self.speaker_status_label = QLabel()
+        self.speaker_status_label.setWordWrap(True)
+        transcription_layout.addRow("", self.speaker_status_label)
+        self.diarization_checkbox.toggled.connect(self.speaker_count.setEnabled)
 
         self.device_combo = QComboBox()
         self._populate_device_combo()
@@ -192,6 +209,9 @@ class SettingsPanel(QWidget):
         self.english_info_label.setVisible(self.settings.language == "en")
 
         self.vad_checkbox.setChecked(self.settings.vad_enabled)
+        self.diarization_checkbox.setChecked(self.settings.diarization_enabled)
+        self.speaker_count.setValue(self.settings.diarization_speakers)
+        self.speaker_count.setEnabled(self.settings.diarization_enabled)
 
         self._set_combo_value(self.device_combo, self.settings.device)
         self._set_combo_value(self.output_format_combo, self.settings.output_format)
@@ -210,6 +230,8 @@ class SettingsPanel(QWidget):
         self.settings.theme = self.theme_combo.currentData()
         self.settings.language = self.language_combo.currentData()
         self.settings.vad_enabled = self.vad_checkbox.isChecked()
+        self.settings.diarization_enabled = self.diarization_checkbox.isChecked()
+        self.settings.diarization_speakers = self.speaker_count.value()
         self.settings.device = self.device_combo.currentData()
         self.settings.output_format = self.output_format_combo.currentData()
         folder = self.models_folder_edit.text().strip()
@@ -249,6 +271,21 @@ class SettingsPanel(QWidget):
             self.model_status_label.setText("Not found (bundled model missing)")
             self.model_status_label.setStyleSheet("color: red;")
             self.download_button.setVisible(False)
+
+        from engine.diarization import dependency_error, model_available, model_path
+        if dependency_error():
+            self.speaker_status_label.setText("Speakers: optional package required (see Set Up Speakers).")
+        elif model_available(model_path(get_base_path(), models_dir)):
+            self.speaker_status_label.setText("Speakers: ready. Adds local processing time.")
+        else:
+            self.speaker_status_label.setText("Speakers: model download required.")
+
+    def _setup_speakers(self):
+        from engine.diarization import model_path
+        from ui.speaker_setup import SpeakerSetupDialog
+        path = model_path(get_base_path(), self.models_folder_edit.text().strip() or None)
+        SpeakerSetupDialog(path, self).exec()
+        self._refresh_model_status()
 
     def _on_download_clicked(self):
         self.download_requested.emit()

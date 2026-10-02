@@ -1,13 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+import sys
+
 block_cipher = None
 
 a = Analysis(
     ['app.py'],
     pathex=['.'],
     binaries=[],
-    datas=[
-        ('C:/Users/ilank/AppData/Local/Programs/Python/Python312/Lib/site-packages/faster_whisper/assets', 'faster_whisper/assets'),
+    datas=collect_data_files('faster_whisper', includes=['assets/*']) + [
         ('ICON.png', '.'),
         ('Binaries', 'Binaries'),
         ('Models', 'Models'),
@@ -29,7 +31,7 @@ a = Analysis(
         'matplotlib', 'pygame', 'notebook', 'nbformat',
         'IPython', 'jupyter', 'black', 'yapf',
         # Large packages not used by the app
-        'pyarrow', 'scipy', 'onnxruntime',
+        'pyarrow', 'scipy',
         'babel', 'pandas', 'sphinx', 'lxml',
         'cryptography', 'rapidfuzz',
     ],
@@ -38,6 +40,16 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Qt uses the ICU API supplied by Windows. A third-party icuuc.dll found on
+# PATH (for example, Poppler's version) has incompatible, versioned exports.
+# Let the Windows loader resolve its own ICU libraries instead of bundling them.
+if sys.platform == 'win32':
+    a.binaries = [
+        entry for entry in a.binaries
+        if entry[0].replace('\\', '/').rsplit('/', 1)[-1].lower()
+        not in {'icuuc.dll', 'icuin.dll', 'icudt.dll'}
+    ]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

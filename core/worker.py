@@ -29,7 +29,7 @@ class TranscriptionWorker(QRunnable):
     def __init__(self, job: Job, settings):
         super().__init__()
         self.job = job
-        self.settings = settings
+        self.settings = settings.model_copy(deep=True)
         self.signals = WorkerSignals()
         self.is_paused = False
         self.is_canceled = False
@@ -85,6 +85,21 @@ class TranscriptionWorker(QRunnable):
 
             # Engine-specific setup
             models_dir = getattr(self.settings, 'models_folder', None) or None
+            speaker_turns = None
+            if self.settings.diarization_enabled:
+                from engine.diarization import diarize_chunks, model_path
+                os.makedirs(self.job.output_dir, exist_ok=True)
+                speaker_turns = diarize_chunks(
+                    [task.chunk_path for task in self.job.tasks],
+                    model_path(base_path, models_dir),
+                    device=self.settings.device,
+                    num_speakers=self.settings.diarization_speakers,
+                    cancel_event=self._cancel_event,
+                    pause_check=lambda: self.is_paused,
+                    status_callback=lambda message: self.signals.job_status_updated.emit(
+                        JobStatus.RUNNING, message),
+                )
+                self.signals.job_status_updated.emit(JobStatus.RUNNING, "Loading transcription model...")
             if engine == "whisper-cpp":
                 ggml_path = resolve_model_path(language, "whisper-cpp", base_path, models_dir)
                 binary_path, binary_error = resolve_whispercpp_binary(base_path)
@@ -138,12 +153,16 @@ class TranscriptionWorker(QRunnable):
 
             # Process tasks with retry and skip-on-failure
             failed_chunks = []
+            chunk_offset = 0.0
             for i, task in enumerate(self.job.tasks):
                 if self.is_canceled:
                     self._save_and_report_cancel()
                     return
 
                 while self.is_paused:
+                    if self.is_canceled:
+                        self._save_and_report_cancel()
+                        return
                     time.sleep(0.1)
 
                 self.signals.task_status_updated.emit(
@@ -185,7 +204,13 @@ class TranscriptionWorker(QRunnable):
                                 transcribe_chunk,
                                 task.chunk_path, model, language, beam_size, self.settings.vad_enabled,
                                 cancel_event=self._cancel_event,
+                                word_timestamps=self.settings.diarization_enabled,
                             )
+                        if speaker_turns is not None:
+                            from engine.diarization import label_segments
+                            if text.strip() and not srt_segments:
+                                raise RuntimeError("Speaker labeling requires transcript timestamps, but none were returned.")
+                            text, srt_segments = label_segments(srt_segments, speaker_turns, chunk_offset)
                         chunk_success = True
                         break
                     except InterruptedError:
@@ -216,7 +241,7 @@ class TranscriptionWorker(QRunnable):
                         base_name = self._get_base_name()
                         save_chunk_checkpoint(
                             self.job.output_dir, base_name, task.chunk_index,
-                            text, srt_segments, task.duration
+                            text, srt_segments, task.duration, start_offset=chunk_offset
                         )
                     self._save_and_report_cancel()
                     return
@@ -229,7 +254,7 @@ class TranscriptionWorker(QRunnable):
                     base_name = self._get_base_name()
                     save_chunk_checkpoint(
                         self.job.output_dir, base_name, task.chunk_index,
-                        text, srt_segments, task.duration
+                        text, srt_segments, task.duration, start_offset=chunk_offset
                     )
                     logging.info(f"Saved checkpoint for chunk {task.chunk_index + 1}/{len(self.job.tasks)}")
 
@@ -249,6 +274,7 @@ class TranscriptionWorker(QRunnable):
                     self.signals.progress_updated.emit(i, 1.0)
 
                 self.processed_audio_duration += task.duration
+                chunk_offset += task.duration
                 self._emit_eta()
 
             # All chunks processed
@@ -266,6 +292,8 @@ class TranscriptionWorker(QRunnable):
                 logging.info(f"Transcription for {self.job.original_file_path} completed in {total_time:.2f} seconds.")
             self._cleanup_checkpoint_files(base_name)
 
+        except InterruptedError:
+            self._save_and_report_cancel()
         except Exception as e:
             try:
                 base_name = self._get_base_name()

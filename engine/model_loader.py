@@ -57,7 +57,8 @@ def resolve_model_path(
 
 def get_all_known_model_names() -> set[str]:
     """Return the set of model directory/file names that are registered for any language/engine."""
-    return {entry["path"][-1] for entry in _MODEL_REGISTRY.values()}
+    from engine.diarization import MODEL_FOLDER
+    return {entry["path"][-1] for entry in _MODEL_REGISTRY.values()} | {MODEL_FOLDER}
 
 
 def get_model_download_info(language: str, engine: str) -> dict | None:

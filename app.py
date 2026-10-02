@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QGroupBox, QPushButton, QProgressBar,
                                QHBoxLayout, QFormLayout, QLineEdit,
                                QFileDialog, QMessageBox, QLabel,
-                               QTabWidget, QProgressDialog)
+                               QTabWidget, QProgressDialog, QScrollArea)
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtCore import QThread, QThreadPool, Qt, Signal
 from core.settings import load_settings, save_settings
@@ -241,7 +241,10 @@ class MainWindow(QMainWindow):
         self.settings_panel = SettingsPanel(self.settings, self.gpu_info)
         self.settings_panel.theme_changed.connect(self._on_theme_changed)
         self.settings_panel.download_requested.connect(self._on_download_requested)
-        self.tab_widget.addTab(self.settings_panel, "Settings")
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setWidget(self.settings_panel)
+        self.tab_widget.addTab(settings_scroll, "Settings")
 
         self.setCentralWidget(main_widget)
 
@@ -660,6 +663,14 @@ class MainWindow(QMainWindow):
         self._save_settings_from_ui()
 
         # Ensure the selected model is available (download if needed)
+        if self.settings.diarization_enabled:
+            from engine.diarization import dependency_error, model_available, model_path
+            error = dependency_error()
+            if not error and not model_available(model_path(get_base_path(), self.settings.models_folder)):
+                error = "Download the speaker model using Settings > Set Up Speakers."
+            if error:
+                QMessageBox.warning(self, "Speaker Setup Required", error)
+                return
         if not self._ensure_model_available():
             return
 
@@ -788,6 +799,11 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--smoke-test-report')
+    startup_args, _ = parser.parse_known_args()
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -798,12 +814,18 @@ if __name__ == "__main__":
         app = QApplication(sys.argv)
 
     window = MainWindow(_detecting_gpu_info())
+    if startup_args.smoke_test_report:
+        window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     window.show()
 
-    startup_worker = StartupWorker(window)
-    window.startup_worker = startup_worker
-    startup_worker.gpu_info_ready.connect(window.update_gpu_info)
-    startup_worker.finished.connect(lambda: setattr(window, "startup_worker", None))
-    startup_worker.start()
+    if startup_args.smoke_test_report:
+        from core.smoke_test import schedule_smoke_test
+        schedule_smoke_test(app, window, FileLoadWorker, startup_args.smoke_test_report)
+    else:
+        startup_worker = StartupWorker(window)
+        window.startup_worker = startup_worker
+        startup_worker.gpu_info_ready.connect(window.update_gpu_info)
+        startup_worker.finished.connect(lambda: setattr(window, "startup_worker", None))
+        startup_worker.start()
 
     sys.exit(app.exec())

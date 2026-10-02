@@ -36,7 +36,7 @@ def get_checkpoint_dir(output_dir, base_filename):
     return os.path.join(output_dir, '.ivrit_checkpoint', base_filename)
 
 
-def save_chunk_checkpoint(output_dir, base_filename, chunk_index, text, srt_segments, duration):
+def save_chunk_checkpoint(output_dir, base_filename, chunk_index, text, srt_segments, duration, start_offset=None):
     """
     Save a checkpoint file for a completed chunk.
 
@@ -60,6 +60,8 @@ def save_chunk_checkpoint(output_dir, base_filename, chunk_index, text, srt_segm
         'srt_segments': srt_segments,
         'duration': duration
     }
+    if start_offset is not None:
+        checkpoint_data['start_offset'] = start_offset
 
     checkpoint_path = os.path.join(checkpoint_dir, f'chunk_{chunk_index:03d}.json')
     with open(checkpoint_path, 'w', encoding='utf-8') as f:
@@ -153,6 +155,7 @@ def merge_checkpoints_to_files(output_dir, base_filename, checkpoints=None, outp
 
         for checkpoint in checkpoints:
             srt_segments = checkpoint['srt_segments']
+            time_offset_seconds = checkpoint.get('start_offset', time_offset_seconds)
 
             for segment_str in srt_segments:
                 data = _load_segment(segment_str)
@@ -163,6 +166,8 @@ def merge_checkpoints_to_files(output_dir, base_filename, checkpoints=None, outp
                     start_offset_s = data["start"] + time_offset_seconds
                     end_offset_s = data["end"] + time_offset_seconds
                     text = data["text"]
+                    if data.get("speaker"):
+                        text = f"{data['speaker']}: {text.strip()}"
                 except (KeyError, TypeError):
                     continue
 
@@ -174,8 +179,11 @@ def merge_checkpoints_to_files(output_dir, base_filename, checkpoints=None, outp
                 merged_srt_content.append("")  # Empty line after each subtitle
                 subtitle_index += 1
 
-            # Update time offset for the next checkpoint based on the last segment
-            if srt_segments:
+            # Silence belongs to the timeline too. New checkpoints also carry
+            # absolute offsets so a skipped/failed chunk does not shift later text.
+            if checkpoint.get('duration', 0) > 0:
+                time_offset_seconds += checkpoint['duration']
+            elif srt_segments:
                 last_segment = _load_segment(srt_segments[-1])
                 if last_segment and "end" in last_segment:
                     time_offset_seconds += last_segment["end"]

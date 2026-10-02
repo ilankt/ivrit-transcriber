@@ -5,6 +5,8 @@ from pydantic import BaseModel
 class Settings(BaseModel):
     language: str = "he"  # "he" (Hebrew) or "en" (English)
     vad_enabled: bool = True
+    diarization_enabled: bool = False
+    diarization_speakers: int = 0  # 0 = detect automatically; recorded files only
     threads: int = 0
     compute_type: str = "auto"
     output_folder: str | None = None
